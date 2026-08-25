@@ -1,4 +1,4 @@
-from autotrader.models import Decision, Equity, Side, Signal, SignalSet
+from autotrader.models import Decision, Equity, Side, SignalSet
 from autotrader.scoring import composite_score
 from autotrader.signals.momentum import MomentumSignal
 from autotrader.signals.regime import RegimeFilter
@@ -16,6 +16,7 @@ class Runner:
         self.regime = RegimeFilter()
         self.sentiment = SentimentSignal(sentiment_llm) if sentiment_llm else None
         self.equity: Equity | None = None
+        self.decisions: list = []
 
     def compute_signalset(self, ticker: str) -> SignalSet:
         bars = self.provider.bars(ticker)
@@ -41,6 +42,7 @@ class Runner:
             if ss.composite < (self.cfg.entry_threshold if self.cfg else 0.5):
                 continue
             decision = self.agent.decide(ss)
+            self.decisions.append(decision)
             if decision.decision is not Decision.BUY:
                 continue
             if self.risk and not self.risk.can_enter(ticker):

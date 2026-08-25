@@ -41,3 +41,19 @@ def test_agent_sentiment_returns_float():
     payload = {"sentiment": 0.4}
     agent = OllamaAgent(base_url="http://x", model="m", session=FakeSession(json.dumps(payload)))
     assert agent.sentiment(["AAPL beats earnings"]) == 0.4
+
+
+def test_agent_decide_returns_hold_on_error():
+    class BadSession:
+        def post(self, url, json, timeout):
+            raise RuntimeError("ollama down")
+    agent = OllamaAgent(base_url="http://x", model="m", session=BadSession())
+    ss = SignalSet(ticker="AAPL", signals=[Signal("momentum", 0.6)], composite=0.55, regime="trending")
+    d = agent.decide(ss)
+    assert d.decision is Decision.HOLD
+    assert d.confidence == 0.0
+
+
+def test_agent_complete_returns_text():
+    agent = OllamaAgent(base_url="http://x", model="m", session=FakeSession("hi"))
+    assert agent.complete("hello") == "hi"

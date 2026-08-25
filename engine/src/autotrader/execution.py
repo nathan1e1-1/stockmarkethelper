@@ -10,6 +10,10 @@ class AlpacaExecutor:
     def __init__(self, cfg: Config):
         self.client = TradingClient(cfg.alpaca_api_key, cfg.alpaca_secret_key, paper=cfg.alpaca_paper)
 
+    def get_equity(self) -> float:
+        account = self.client.get_account()
+        return float(account.equity)
+
     def market_order(self, ticker: str, qty: int, side: Side) -> Order:
         req = MarketOrderRequest(
             symbol=ticker,

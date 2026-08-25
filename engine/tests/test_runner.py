@@ -30,3 +30,10 @@ def test_runner_scans_and_buys_candidate():
     runner.equity = Equity(equity=100000.0, day_start_equity=100000.0, peak_equity=100000.0, day="d")
     runner.run_once(universe=["AAPL"])
     assert len(runner.executor.submitted) >= 1
+
+
+def test_runner_records_decisions():
+    runner = Runner(provider=FixtureProvider(), agent=BuyAgent(), executor=FakeExec(), risk=None, cfg=None)
+    runner.equity = Equity(equity=100000.0, day_start_equity=100000.0, peak_equity=100000.0, day="d")
+    runner.run_once(universe=["AAPL"])
+    assert len(runner.decisions) == 1

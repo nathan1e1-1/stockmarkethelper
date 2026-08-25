@@ -16,3 +16,12 @@ def test_load_missing_returns_fresh_state(tmp_path):
     state = store.load()
     assert state.equity is None
     assert state.positions == []
+
+
+from autotrader.models import Decision, AgentDecision
+
+def test_state_roundtrips_decision_type(tmp_path):
+    store = StateStore(tmp_path)
+    store.save(State(positions=[], decisions=[AgentDecision(ticker="AAPL", decision=Decision.BUY, rationale="t", confidence=0.7)]))
+    loaded = store.load()
+    assert loaded.decisions[0].decision is Decision.BUY
