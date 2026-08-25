@@ -1,0 +1,22 @@
+alpaca:
+  paper: true
+ollama:
+  base_url: "http://localhost:11434"
+  model: "llama3.2"
+risk:
+  paper_capital: 100000.0
+  max_position_pct: 0.02
+  max_positions: 3
+  kill_switch_pct: 0.10
+  daily_loss_pct: 0.05
+universe:
+  size: 20
+  min_price: 5.0
+  min_volume: 500000
+loop:
+  scan_interval_seconds: 60
+scoring:
+  entry_threshold: 0.5
+  weights:
+    momentum: 0.6
+    sentiment: 0.4
