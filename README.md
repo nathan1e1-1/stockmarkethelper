@@ -35,6 +35,15 @@ Paper trading only for the first 2 weeks; moving to real money is a manual, gate
 cd engine && .venv/bin/pytest -q
 ```
 
+## Known limitations (v1)
+
+- The macOS app polls the engine over REST; WebSocket streaming is not yet wired.
+- macOS notification banners for kill-switch / daily-stop are not yet implemented (the
+  dashboard shows those states visually).
+- `min_price` is loaded from config but the universe builder currently filters on volume
+  only (Alpaca's most-active screener does not return price).
+
+
 ## Repo layout
 
 - `engine/src/autotrader/` — engine package (`providers/`, `signals/`, `agent.py`, `risk.py`,
