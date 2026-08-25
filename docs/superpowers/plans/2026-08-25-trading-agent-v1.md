@@ -561,19 +561,16 @@ class NewsProvider(Protocol):
 
 `engine/src/autotrader/providers/fixtures.py`:
 ```python
-import math
-
-
 class FixtureProvider:
     """Deterministic in-memory provider for tests and replay."""
 
     def latest_price(self, ticker: str) -> float:
-        return 100.0 + (sum(ord(c) for c in ticker) % 90)
+        return 190.0
 
     def bars(self, ticker: str, limit: int = 50) -> list[dict]:
-        base = self.latest_price(ticker)
+        # Clean uptrend so momentum is strongly positive.
         return [
-            {"t": f"2026-08-25T13:{i:02d}:00Z", "close": base + math.sin(i / 5) * 2}
+            {"t": f"2026-08-25T13:{i:02d}:00Z", "close": 100.0 + i}
             for i in range(limit)
         ]
 
@@ -585,7 +582,7 @@ class FixtureProvider:
 
     def gainers(self, limit: int) -> list[dict]:
         return [
-            {"ticker": f"TICK{i:02d}", "price": 50.0 + i, "volume": 1_000_000 + i * 1000}
+            {"ticker": f"TICK{i:02d}", "volume": 1_000_000 + i * 1000}
             for i in range(limit)
         ]
 ```
@@ -594,10 +591,16 @@ class FixtureProvider:
 ```python
 from datetime import datetime, timedelta, timezone
 
-from alpaca.data.enums import Screener
-from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.historical.news import StockNewsClient
-from alpaca.data.requests import GetNewsRequest, StockBarsRequest, StockLatestTradeRequest, StockScreenersRequest
+from alpaca.data import (
+    MostActivesBy,
+    MostActivesRequest,
+    NewsClient,
+    NewsRequest,
+    ScreenerClient,
+    StockBarsRequest,
+    StockHistoricalDataClient,
+    StockLatestTradeRequest,
+)
 from alpaca.data.timeframe import TimeFrame
 from alpaca.trading.client import TradingClient
 
@@ -607,7 +610,8 @@ from autotrader.config import Config
 class AlpacaProvider:
     def __init__(self, cfg: Config):
         self._data = StockHistoricalDataClient(cfg.alpaca_api_key, cfg.alpaca_secret_key)
-        self._news = StockNewsClient(cfg.alpaca_api_key, cfg.alpaca_secret_key)
+        self._news = NewsClient(cfg.alpaca_api_key, cfg.alpaca_secret_key)
+        self._screeners = ScreenerClient(cfg.alpaca_api_key, cfg.alpaca_secret_key)
         self._trading = TradingClient(cfg.alpaca_api_key, cfg.alpaca_secret_key, paper=cfg.alpaca_paper)
 
     def latest_price(self, ticker: str) -> float:
@@ -623,18 +627,20 @@ class AlpacaProvider:
         return [{"t": b.timestamp.isoformat(), "close": float(b.close)} for b in bars]
 
     def news(self, ticker: str, limit: int = 5) -> list[dict]:
-        req = GetNewsRequest(symbols=ticker, limit=limit)
-        raw = self._news.get_news(req).news
-        return [{"headline": n.headline, "summary": n.summary} for n in raw]
+        req = NewsRequest(symbols=ticker, limit=limit)
+        news = self._news.get_news(req).data
+        return [{"headline": n.headline, "summary": n.summary} for n in news]
 
     def gainers(self, limit: int) -> list[dict]:
-        req = StockScreenersRequest(screener=Screener.MOST_ACTIVES, limit=limit)
-        res = self._data.get_stock_screeners(req)
+        req = MostActivesRequest(by=MostActivesBy.VOLUME, top=limit)
+        res = self._screeners.get_most_actives(req)
         return [
-            {"ticker": item.symbol, "price": float(item.price), "volume": int(item.volume)}
-            for item in res.most_actives
+            {"ticker": a.symbol, "volume": int(a.volume)}
+            for a in res.most_actives
         ]
 ```
+
+> **alpaca-py 0.44.0 note:** this is the actual installed API. `MostActivesRequest` uses `by` + `top` (not `limit`), and `ActiveStock` has `symbol`/`volume`/`trade_count` (no `price`), so `gainers()` returns ticker + volume only. Universe filtering uses volume, not price.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -662,17 +668,16 @@ from autotrader.universe import build_universe
 from autotrader.providers.fixtures import FixtureProvider
 
 
-def test_build_universe_filters_by_price_and_volume():
+def test_build_universe_filters_by_volume():
     p = FixtureProvider()
-    result = build_universe(p, size=10, min_price=5.0, min_volume=500000)
+    result = build_universe(p, size=10, min_volume=500000)
     assert len(result) <= 10
-    assert all(r["price"] >= 5.0 for r in result)
     assert all(r["volume"] >= 500000 for r in result)
 
 
 def test_build_universe_returns_tickers_only():
     p = FixtureProvider()
-    tickers = build_universe(p, size=10, min_price=5.0, min_volume=500000, tickers_only=True)
+    tickers = build_universe(p, size=10, min_volume=500000, tickers_only=True)
     assert isinstance(tickers, list)
     assert all(isinstance(t, str) for t in tickers)
 ```
@@ -692,14 +697,13 @@ from autotrader.providers.base import MarketDataProvider
 def build_universe(
     provider: MarketDataProvider,
     size: int = 20,
-    min_price: float = 5.0,
     min_volume: int = 500000,
     tickers_only: bool = False,
 ) -> list:
     candidates = provider.gainers(limit=size * 3)
     filtered = [
         c for c in candidates
-        if c.get("price", 0.0) >= min_price and c.get("volume", 0) >= min_volume
+        if c.get("volume", 0) >= min_volume
     ][:size]
     if tickers_only:
         return [c["ticker"] for c in filtered]
@@ -1597,7 +1601,7 @@ def main() -> None:
 
     runner = Runner(provider=provider, agent=agent, executor=executor, risk=risk, cfg=cfg, sentiment_llm=agent)
 
-    universe = build_universe(provider, size=cfg.universe_size, min_price=cfg.min_price, min_volume=cfg.min_volume, tickers_only=True)
+    universe = build_universe(provider, size=cfg.universe_size, min_volume=cfg.min_volume, tickers_only=True)
     print(f"Universe: {universe}")
 
     while True:
