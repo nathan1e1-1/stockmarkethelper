@@ -34,11 +34,12 @@ def main() -> None:
     runner = Runner(provider=provider, agent=agent, executor=executor, risk=risk, cfg=cfg, sentiment_llm=agent)
 
     app = create_app(shared)
-    threading.Thread(
-        target=uvicorn.run,
-        kwargs={"app": app, "host": "127.0.0.1", "port": 8000, "log_level": "warning"},
-        daemon=True,
-    ).start()
+    if not args.once:
+        threading.Thread(
+            target=uvicorn.run,
+            kwargs={"app": app, "host": "127.0.0.1", "port": 8000, "log_level": "warning"},
+            daemon=True,
+        ).start()
 
     universe = build_universe(provider, size=cfg.universe_size, min_volume=cfg.min_volume, tickers_only=True)
     print(f"Universe: {universe}")

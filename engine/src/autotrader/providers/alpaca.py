@@ -38,7 +38,7 @@ class AlpacaProvider:
 
     def news(self, ticker: str, limit: int = 5) -> list[dict]:
         req = NewsRequest(symbols=ticker, limit=limit)
-        news = self._news.get_news(req).data
+        news = self._news.get_news(req).data["news"]
         return [{"headline": n.headline, "summary": n.summary} for n in news]
 
     def gainers(self, limit: int) -> list[dict]:
