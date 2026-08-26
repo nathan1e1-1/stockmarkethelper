@@ -16,7 +16,7 @@ universe:
 loop:
   scan_interval_seconds: 60
 scoring:
-  entry_threshold: 0.5
+  entry_threshold: 0.3
   weights:
     momentum: 0.6
     sentiment: 0.4
