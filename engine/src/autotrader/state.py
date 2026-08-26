@@ -53,4 +53,7 @@ class StateStore:
 
     def save(self, state: State) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(asdict(state), default=str, indent=2))
+        try:
+            self.path.write_text(json.dumps(asdict(state), default=str, indent=2))
+        except OSError as e:
+            print(f"[warn] failed to write journal {self.path}: {e}")

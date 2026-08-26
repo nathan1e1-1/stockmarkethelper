@@ -35,3 +35,15 @@ def test_state_roundtrips_closed_trades(tmp_path):
     assert len(loaded.closed_trades) == 1
     assert loaded.closed_trades[0].realized_pnl == 30.0
     assert loaded.closed_trades[0].exit_reason == "take_profit"
+
+
+def test_save_survives_disk_full(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    def boom(self, *args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    store = StateStore(tmp_path)
+    eq = Equity(equity=98000.0, day_start_equity=100000.0, peak_equity=100000.0, day="2026-08-25")
+    monkeypatch.setattr(Path, "write_text", boom)
+    store.save(State(equity=eq))  # must not raise
