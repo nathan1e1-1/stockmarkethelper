@@ -34,6 +34,8 @@ covering the whole day. No summary is produced until then. Holidays are not dete
 - 2% of equity per trade, max 3 concurrent positions.
 - −10% from peak equity: hard kill-switch (flatten all + freeze until manually re-armed).
 - −5% from day-start equity: stop trading for the day.
+- Per-position exits are deterministic rules (outside the LLM): stop-loss −2%, take-profit +3%,
+  and flatten-at-close (15:55 ET).
 
 Paper trading only for the first 2 weeks; moving to real money is a manual, gated decision.
 

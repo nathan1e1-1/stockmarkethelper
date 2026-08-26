@@ -2,7 +2,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from autotrader.models import AgentDecision, Decision, Equity, Position, Signal, SignalSet
+from autotrader.models import AgentDecision, ClosedTrade, Decision, Equity, Position, Signal, SignalSet
 
 
 @dataclass
@@ -10,6 +10,8 @@ class State:
     equity: Equity | None = None
     positions: list[Position] = field(default_factory=list)
     decisions: list[AgentDecision] = field(default_factory=list)
+    closed_trades: list[ClosedTrade] = field(default_factory=list)
+    unrealized_pnl: float = 0.0
 
 
 def _decode_decision(d: dict) -> AgentDecision:
@@ -45,6 +47,8 @@ class StateStore:
             equity=Equity(**eq) if eq else None,
             positions=[Position(**p) for p in raw.get("positions", [])],
             decisions=[_decode_decision(d) for d in raw.get("decisions", [])],
+            closed_trades=[ClosedTrade(**c) for c in raw.get("closed_trades", [])],
+            unrealized_pnl=raw.get("unrealized_pnl", 0.0),
         )
 
     def save(self, state: State) -> None:

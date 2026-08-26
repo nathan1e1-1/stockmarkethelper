@@ -50,6 +50,8 @@ def main() -> None:
     risk.day_start_equity = equity
     risk.peak_equity = equity
 
+    flatten_time = datetime.strptime(cfg.flatten_time, "%H:%M").time() if cfg.flatten_at_close else None
+
     def sync_and_scan(day: str) -> None:
         equity = executor.get_equity()
         risk.peak_equity = max(risk.peak_equity, equity)
@@ -60,15 +62,26 @@ def main() -> None:
             peak_equity=risk.peak_equity,
             day=day,
         )
+        runner.manage_exits(flatten_time=flatten_time, now=datetime.now(EASTERN))
         runner.run_once(universe)
         shared.equity = runner.equity
         shared.positions = executor.positions()
         shared.decisions = runner.decisions
         shared.risk = risk
-        store.save(State(equity=runner.equity, positions=risk.positions, decisions=runner.decisions))
+        store.save(State(equity=runner.equity, positions=risk.positions, decisions=runner.decisions, closed_trades=runner.closed_trades))
 
     def generate_summary() -> None:
-        summary = daily_summary(State(equity=runner.equity, positions=risk.positions, decisions=runner.decisions), agent)
+        unrealized = 0.0
+        for p in risk.positions:
+            unrealized += (provider.latest_price(p.ticker) - p.avg_entry_price) * p.qty
+        state = State(
+            equity=runner.equity,
+            positions=risk.positions,
+            decisions=runner.decisions,
+            closed_trades=runner.closed_trades,
+            unrealized_pnl=unrealized,
+        )
+        summary = daily_summary(state, agent)
         shared.summary = summary
         print(f"Daily summary:\n{summary}")
 
@@ -87,6 +100,8 @@ def main() -> None:
             current_day = day
             summary_done = False
             runner.decisions = []
+            runner.closed_trades = []
+            runner.flattened = False
             equity = executor.get_equity()
             risk.day_start_equity = equity
             risk.peak_equity = max(risk.peak_equity, equity)

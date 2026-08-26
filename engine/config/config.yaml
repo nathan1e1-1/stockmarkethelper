@@ -20,3 +20,8 @@ scoring:
   weights:
     momentum: 0.6
     sentiment: 0.4
+exits:
+  stop_loss_pct: 0.02
+  take_profit_pct: 0.03
+  flatten_at_close: true
+  flatten_time: "15:55"

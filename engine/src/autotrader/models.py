@@ -63,6 +63,18 @@ class Position:
 
 
 @dataclass
+class ClosedTrade:
+    ticker: str
+    qty: float
+    entry_price: float
+    exit_price: float
+    realized_pnl: float
+    exit_reason: str
+    opened_at: datetime = field(default_factory=_now)
+    closed_at: datetime = field(default_factory=_now)
+
+
+@dataclass
 class Equity:
     equity: float
     day_start_equity: float

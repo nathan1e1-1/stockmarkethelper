@@ -12,6 +12,7 @@ def test_load_config_reads_yaml_and_env(tmp_path, monkeypatch):
         "universe:\n  size: 20\n  min_price: 5.0\n  min_volume: 500000\n"
         "loop:\n  scan_interval_seconds: 60\n"
         "scoring:\n  entry_threshold: 0.5\n  weights:\n    momentum: 0.6\n    sentiment: 0.4\n"
+        "exits:\n  stop_loss_pct: 0.02\n  take_profit_pct: 0.03\n  flatten_at_close: true\n  flatten_time: \"15:55\"\n"
     )
     monkeypatch.setenv("ALPACA_API_KEY", "pk_test")
     monkeypatch.setenv("ALPACA_SECRET_KEY", "sk_test")
@@ -20,6 +21,10 @@ def test_load_config_reads_yaml_and_env(tmp_path, monkeypatch):
     assert cfg.alpaca_paper is True
     assert cfg.max_position_pct == 0.02
     assert cfg.entry_threshold == 0.5
+    assert cfg.stop_loss_pct == 0.02
+    assert cfg.take_profit_pct == 0.03
+    assert cfg.flatten_at_close is True
+    assert cfg.flatten_time == "15:55"
 
 
 def test_load_config_requires_api_key(tmp_path, monkeypatch):
@@ -32,6 +37,7 @@ def test_load_config_requires_api_key(tmp_path, monkeypatch):
         "universe:\n  size: 20\n  min_price: 5.0\n  min_volume: 500000\n"
         "loop:\n  scan_interval_seconds: 60\n"
         "scoring:\n  entry_threshold: 0.5\n  weights:\n    momentum: 0.6\n    sentiment: 0.4\n"
+        "exits:\n  stop_loss_pct: 0.02\n  take_profit_pct: 0.03\n  flatten_at_close: true\n  flatten_time: \"15:55\"\n"
     )
     monkeypatch.delenv("ALPACA_API_KEY", raising=False)
     monkeypatch.delenv("ALPACA_SECRET_KEY", raising=False)

@@ -19,6 +19,17 @@ def daily_summary(state: State, llm) -> str:
 
     decision_block = "\n".join(decision_lines) if decision_lines else "No trades were placed today."
 
+    if state.closed_trades:
+        trade_lines = [
+            f"- {t.ticker}: {t.exit_reason}, realized ${t.realized_pnl:+.2f}"
+            for t in state.closed_trades
+        ]
+        total = sum(t.realized_pnl for t in state.closed_trades)
+        trade_lines.append(f"Total realized P&L: ${total:+.2f}")
+        trade_block = "\n".join(trade_lines)
+    else:
+        trade_block = "No trades were closed today."
+
     if state.positions:
         position_block = "\n".join(
             f"- {p.ticker}: {p.qty:g} shares @ {p.avg_entry_price:.2f}"
@@ -31,9 +42,10 @@ def daily_summary(state: State, llm) -> str:
         "Write a concise, honest post-market summary for an intraday trading day.\n"
         f"Day P&L: {pnl:.2f}%\n"
         f"Decisions made:\n{decision_block}\n"
+        f"Closed trades:\n{trade_block}\n"
         f"Open positions at close:\n{position_block}\n"
-        "Report only these facts. Do not claim that any individual trade won or lost; "
-        "per-trade results are not available. If no trades were placed, say so plainly. "
+        f"Unrealized P&L on open positions: ${getattr(state, 'unrealized_pnl', 0.0):+.2f}\n"
+        "Report only the realized results listed above. Do not invent trades, tickers, or outcomes. "
         "Then suggest one concrete process improvement for tomorrow."
     )
     return llm.complete(prompt)

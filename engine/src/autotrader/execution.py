@@ -24,6 +24,9 @@ class AlpacaExecutor:
         raw = self.client.submit_order(req)
         return Order(id=str(raw.id), ticker=ticker, side=side, qty=float(qty), status=raw.status)
 
+    def sell(self, ticker: str, qty: int) -> Order:
+        return self.market_order(ticker, qty, Side.SELL)
+
     def positions(self) -> list[Position]:
         out = []
         for p in self.client.get_all_positions():

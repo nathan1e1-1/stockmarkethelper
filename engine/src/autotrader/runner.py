@@ -1,4 +1,6 @@
-from autotrader.models import Decision, Equity, Side, SignalSet
+from autotrader.exits import ExitManager
+from autotrader.market import EASTERN
+from autotrader.models import ClosedTrade, Decision, Equity, Side, SignalSet
 from autotrader.scoring import composite_score
 from autotrader.signals.momentum import MomentumSignal
 from autotrader.signals.regime import RegimeFilter
@@ -17,6 +19,9 @@ class Runner:
         self.sentiment = SentimentSignal(sentiment_llm) if sentiment_llm else None
         self.equity: Equity | None = None
         self.decisions: list = []
+        self.exit_manager = ExitManager(cfg.stop_loss_pct, cfg.take_profit_pct) if cfg else None
+        self.closed_trades: list = []
+        self.flattened = False
 
     def compute_signalset(self, ticker: str) -> SignalSet:
         bars = self.provider.bars(ticker)
@@ -57,3 +62,31 @@ class Runner:
             qty = self.risk.position_size(ticker, price, self.equity.equity) if self.risk else 0
             self.executor.market_order(ticker, qty, Side.BUY)
             print(f"[order] BUY {ticker} x{qty} @ {price}")
+
+    def manage_exits(self, flatten_time=None, now=None) -> None:
+        if self.exit_manager is None or self.risk is None:
+            return
+        if flatten_time and now and now.astimezone(EASTERN).time() >= flatten_time and not self.flattened:
+            for pos in list(self.risk.positions):
+                price = self.provider.latest_price(pos.ticker)
+                self._close(pos, price, "flatten")
+            self.flattened = True
+            return
+        for pos in list(self.risk.positions):
+            price = self.provider.latest_price(pos.ticker)
+            reason = self.exit_manager.evaluate(pos, price)
+            if reason:
+                self._close(pos, price, reason)
+
+    def _close(self, pos, price: float, reason: str) -> None:
+        qty = int(pos.qty)
+        self.executor.sell(pos.ticker, qty)
+        self.closed_trades.append(ClosedTrade(
+            ticker=pos.ticker,
+            qty=pos.qty,
+            entry_price=pos.avg_entry_price,
+            exit_price=price,
+            realized_pnl=(price - pos.avg_entry_price) * pos.qty,
+            exit_reason=reason,
+        ))
+        self.risk.positions = [p for p in self.risk.positions if p.ticker != pos.ticker]

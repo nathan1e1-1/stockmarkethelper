@@ -13,11 +13,20 @@ class FakeExec:
     def positions(self):
         return []
 
+    def sell(self, ticker, qty):
+        return self.market_order(ticker, qty, Side.SELL)
+
 
 def test_executor_buys():
     ex = FakeExec()
     ex.market_order("AAPL", 20, Side.BUY)
     assert ex.submitted == [("AAPL", 20, Side.BUY)]
+
+
+def test_executor_sells():
+    ex = FakeExec()
+    ex.sell("AAPL", 20)
+    assert ex.submitted == [("AAPL", 20, Side.SELL)]
 
 
 def test_executor_lists_positions_empty():

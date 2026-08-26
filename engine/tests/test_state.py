@@ -18,10 +18,20 @@ def test_load_missing_returns_fresh_state(tmp_path):
     assert state.positions == []
 
 
-from autotrader.models import Decision, AgentDecision
+from autotrader.models import Decision, AgentDecision, ClosedTrade
 
 def test_state_roundtrips_decision_type(tmp_path):
     store = StateStore(tmp_path)
     store.save(State(positions=[], decisions=[AgentDecision(ticker="AAPL", decision=Decision.BUY, rationale="t", confidence=0.7)]))
     loaded = store.load()
     assert loaded.decisions[0].decision is Decision.BUY
+
+
+def test_state_roundtrips_closed_trades(tmp_path):
+    store = StateStore(tmp_path)
+    t = ClosedTrade(ticker="NVDA", qty=10.0, entry_price=100.0, exit_price=103.0, realized_pnl=30.0, exit_reason="take_profit")
+    store.save(State(closed_trades=[t]))
+    loaded = store.load()
+    assert len(loaded.closed_trades) == 1
+    assert loaded.closed_trades[0].realized_pnl == 30.0
+    assert loaded.closed_trades[0].exit_reason == "take_profit"

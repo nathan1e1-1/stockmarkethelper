@@ -1,6 +1,6 @@
 from autotrader.summary import daily_summary
 from autotrader.state import State
-from autotrader.models import Equity, AgentDecision, Decision, SignalSet, Signal, Position
+from autotrader.models import Equity, AgentDecision, Decision, SignalSet, Signal, Position, ClosedTrade
 
 
 class FakeLLM:
@@ -64,4 +64,18 @@ def test_daily_summary_forbids_outcome_claims():
     llm = FakeLLM()
     state = State(equity=_eq(), decisions=[])
     daily_summary(state, llm)
-    assert "per-trade results are not available" in llm.prompts[0]
+    assert "Report only the realized results listed above" in llm.prompts[0]
+
+
+def test_daily_summary_includes_realized_pnl():
+    llm = FakeLLM()
+    state = State(
+        equity=_eq(),
+        decisions=[],
+        closed_trades=[ClosedTrade(ticker="NVDA", qty=10.0, entry_price=100.0, exit_price=103.0, realized_pnl=30.0, exit_reason="take_profit")],
+    )
+    daily_summary(state, llm)
+    prompt = llm.prompts[0]
+    assert "NVDA" in prompt
+    assert "take_profit" in prompt
+    assert "+30.00" in prompt

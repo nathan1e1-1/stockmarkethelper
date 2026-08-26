@@ -23,6 +23,10 @@ class Config:
     scan_interval_seconds: int
     entry_threshold: float
     signal_weights: dict
+    stop_loss_pct: float
+    take_profit_pct: float
+    flatten_at_close: bool
+    flatten_time: str
 
 
 def load_config(path: str = "config/config.yaml") -> Config:
@@ -50,4 +54,8 @@ def load_config(path: str = "config/config.yaml") -> Config:
         scan_interval_seconds=raw["loop"]["scan_interval_seconds"],
         entry_threshold=raw["scoring"]["entry_threshold"],
         signal_weights=raw["scoring"]["weights"],
+        stop_loss_pct=raw["exits"]["stop_loss_pct"],
+        take_profit_pct=raw["exits"]["take_profit_pct"],
+        flatten_at_close=raw["exits"]["flatten_at_close"],
+        flatten_time=raw["exits"]["flatten_time"],
     )
