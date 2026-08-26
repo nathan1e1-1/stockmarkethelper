@@ -4,7 +4,7 @@ import Foundation
 final class EngineClient: ObservableObject {
     @Published var status: EngineStatus?
     @Published var summary: String = ""
-    private let baseURL = URL(string: "http://127.0.0.1:8000")!
+    private let baseURL = URL(string: "http://127.0.0.1:8001")!
 
     func refresh() async {
         do {
