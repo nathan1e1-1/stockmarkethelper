@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from alpaca.data import (
+    DataFeed,
     MostActivesBy,
     MostActivesRequest,
     NewsClient,
@@ -24,14 +25,14 @@ class AlpacaProvider:
         self._trading = TradingClient(cfg.alpaca_api_key, cfg.alpaca_secret_key, paper=cfg.alpaca_paper)
 
     def latest_price(self, ticker: str) -> float:
-        req = StockLatestTradeRequest(symbol_or_symbols=[ticker])
+        req = StockLatestTradeRequest(symbol_or_symbols=[ticker], feed=DataFeed.IEX)
         trade = self._data.get_stock_latest_trade(req)[ticker]
         return float(trade.price)
 
     def bars(self, ticker: str, limit: int = 50) -> list[dict]:
         end = datetime.now(timezone.utc)
         start = end - timedelta(days=7)
-        req = StockBarsRequest(symbol_or_symbols=[ticker], timeframe=TimeFrame.Minute, start=start, end=end, limit=limit)
+        req = StockBarsRequest(symbol_or_symbols=[ticker], timeframe=TimeFrame.Minute, start=start, end=end, limit=limit, feed=DataFeed.IEX)
         bars = self._data.get_stock_bars(req)[ticker]
         return [{"t": b.timestamp.isoformat(), "close": float(b.close)} for b in bars]
 

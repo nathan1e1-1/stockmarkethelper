@@ -35,6 +35,7 @@ def test_load_config_requires_api_key(tmp_path, monkeypatch):
     )
     monkeypatch.delenv("ALPACA_API_KEY", raising=False)
     monkeypatch.delenv("ALPACA_SECRET_KEY", raising=False)
+    monkeypatch.setattr("autotrader.config.load_dotenv", lambda: None)
     import pytest
     with pytest.raises(ValueError):
         load_config(str(cfg_path))
