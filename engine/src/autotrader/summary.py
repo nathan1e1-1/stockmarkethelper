@@ -5,7 +5,7 @@ def daily_summary(state: State, llm) -> str:
     eq = state.equity
     pnl = (eq.equity / eq.day_start_equity - 1.0) * 100 if eq and eq.day_start_equity else 0.0
 
-    lines = []
+    decision_lines = []
     for d in state.decisions:
         signals = ""
         if d.signals:
@@ -15,18 +15,25 @@ def daily_summary(state: State, llm) -> str:
             parts.append(f"rationale: {d.rationale}")
         if signals:
             parts.append(f"signals: {signals}")
-        lines.append("- " + " | ".join(parts))
+        decision_lines.append("- " + " | ".join(parts))
 
-    if lines:
-        decision_block = "\n".join(lines)
+    decision_block = "\n".join(decision_lines) if decision_lines else "No trades were placed today."
+
+    if state.positions:
+        position_block = "\n".join(
+            f"- {p.ticker}: {p.qty:g} shares @ {p.avg_entry_price:.2f}"
+            for p in state.positions
+        )
     else:
-        decision_block = "No trades were placed today."
+        position_block = "No open positions."
 
     prompt = (
-        "Write a concise, honest post-market summary for an intraday trading day. "
-        f"Day P&L was {pnl:.2f}%. "
-        f"Decisions:\n{decision_block}\n"
-        "Cover: what went well, what went wrong, and one concrete improvement for tomorrow. "
-        "Only reference the decisions listed above. Do not invent trades or tickers that are not listed."
+        "Write a concise, honest post-market summary for an intraday trading day.\n"
+        f"Day P&L: {pnl:.2f}%\n"
+        f"Decisions made:\n{decision_block}\n"
+        f"Open positions at close:\n{position_block}\n"
+        "Report only these facts. Do not claim that any individual trade won or lost; "
+        "per-trade results are not available. If no trades were placed, say so plainly. "
+        "Then suggest one concrete process improvement for tomorrow."
     )
     return llm.complete(prompt)

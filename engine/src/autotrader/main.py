@@ -1,6 +1,7 @@
 import argparse
 import threading
 import time
+from datetime import datetime
 
 import uvicorn
 
@@ -8,6 +9,7 @@ from autotrader.agent import OllamaAgent
 from autotrader.config import load_config
 from autotrader.execution import AlpacaExecutor
 from autotrader.ipc import SharedState, create_app
+from autotrader.market import EASTERN, is_after_close, is_market_open
 from autotrader.models import Equity
 from autotrader.providers.alpaca import AlpacaProvider
 from autotrader.risk import RiskManager
@@ -44,38 +46,58 @@ def main() -> None:
     universe = build_universe(provider, size=cfg.universe_size, min_volume=cfg.min_volume, tickers_only=True)
     print(f"Universe: {universe}")
 
-    day = time.strftime("%Y-%m-%d")
     equity = executor.get_equity()
     risk.day_start_equity = equity
     risk.peak_equity = equity
 
-    try:
-        while True:
-            equity = executor.get_equity()
-            risk.peak_equity = max(risk.peak_equity, equity)
-            risk.positions = executor.positions()
-            runner.equity = Equity(
-                equity=equity,
-                day_start_equity=risk.day_start_equity,
-                peak_equity=risk.peak_equity,
-                day=day,
-            )
+    def sync_and_scan(day: str) -> None:
+        equity = executor.get_equity()
+        risk.peak_equity = max(risk.peak_equity, equity)
+        risk.positions = executor.positions()
+        runner.equity = Equity(
+            equity=equity,
+            day_start_equity=risk.day_start_equity,
+            peak_equity=risk.peak_equity,
+            day=day,
+        )
+        runner.run_once(universe)
+        shared.equity = runner.equity
+        shared.positions = executor.positions()
+        shared.decisions = runner.decisions
+        shared.risk = risk
+        store.save(State(equity=runner.equity, positions=risk.positions, decisions=runner.decisions))
 
-            runner.run_once(universe)
-
-            shared.equity = runner.equity
-            shared.positions = executor.positions()
-            shared.decisions = runner.decisions
-            shared.risk = risk
-            store.save(State(equity=runner.equity, positions=risk.positions, decisions=runner.decisions))
-
-            if args.once:
-                break
-            time.sleep(cfg.scan_interval_seconds)
-    finally:
+    def generate_summary() -> None:
         summary = daily_summary(State(equity=runner.equity, positions=risk.positions, decisions=runner.decisions), agent)
         shared.summary = summary
         print(f"Daily summary:\n{summary}")
+
+    if args.once:
+        sync_and_scan(datetime.now(EASTERN).strftime("%Y-%m-%d"))
+        generate_summary()
+        return
+
+    current_day = None
+    summary_done = False
+    while True:
+        now = datetime.now(EASTERN)
+        day = now.strftime("%Y-%m-%d")
+
+        if day != current_day:
+            current_day = day
+            summary_done = False
+            runner.decisions = []
+            equity = executor.get_equity()
+            risk.day_start_equity = equity
+            risk.peak_equity = max(risk.peak_equity, equity)
+
+        if is_market_open(now):
+            sync_and_scan(day)
+        elif is_after_close(now) and not summary_done:
+            generate_summary()
+            summary_done = True
+
+        time.sleep(cfg.scan_interval_seconds)
 
 
 if __name__ == "__main__":
