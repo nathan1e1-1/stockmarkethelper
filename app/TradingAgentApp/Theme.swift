@@ -1,16 +1,22 @@
 import SwiftUI
 
+// shadcn/ui "dark" theme tokens (zinc scale), ported to SwiftUI.
 extension Color {
-    static let bg = Color(hex: 0x0B0F14)
-    static let surface = Color(hex: 0x141B24)
-    static let surfaceHigh = Color(hex: 0x1C2530)
-    static let accent = Color(hex: 0x2DD4BF)
-    static let textPrimary = Color(hex: 0xE6EDF3)
-    static let textSecondary = Color(hex: 0x8B949E)
-    static let gain = Color(hex: 0x3FB950)
-    static let loss = Color(hex: 0xF85149)
-    static let warn = Color(hex: 0xD29922)
-    static let border = Color(hex: 0x2A333D)
+    static let background = Color(hex: 0x09090B)       // zinc-950
+    static let foreground = Color(hex: 0xFAFAFA)       // zinc-50
+    static let card = Color(hex: 0x09090B)
+    static let muted = Color(hex: 0x27272A)            // zinc-800
+    static let mutedForeground = Color(hex: 0xA1A1AA)  // zinc-400
+    static let border = Color(hex: 0x27272A)
+    static let primary = Color(hex: 0xFAFAFA)
+    static let primaryForeground = Color(hex: 0x09090B)
+    static let secondary = Color(hex: 0x27272A)
+    static let accent = Color(hex: 0x27272A)
+    static let destructive = Color(hex: 0xEF4444)      // red-500
+    static let gain = Color(hex: 0x22C55E)             // green-500
+    static let loss = Color(hex: 0xEF4444)
+    static let warn = Color(hex: 0xEAB308)             // yellow-500
+    static let ring = Color(hex: 0xA1A1AA)
 
     init(hex: UInt32) {
         let r = Double((hex >> 16) & 0xFF) / 255.0
@@ -20,50 +26,8 @@ extension Color {
     }
 }
 
-struct CardModifier: ViewModifier {
-    func body(content: Content) -> some View {
-        content
-            .padding(20)
-            .background(Color.surface)
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(Color.border, lineWidth: 1)
-            )
-    }
-}
-
-extension View {
-    func card() -> some View { modifier(CardModifier()) }
-}
-
-struct StatCard: View {
-    let title: String
-    let value: String
-    var tint: Color = .textPrimary
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.caption)
-                .foregroundColor(.textSecondary)
-            Text(value)
-                .font(.title2.weight(.semibold))
-                .monospacedDigit()
-                .foregroundColor(tint)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .card()
-    }
-}
-
-struct SectionTitle: View {
-    let text: String
-
-    var body: some View {
-        Text(text.uppercased())
-            .font(.caption.weight(.semibold))
-            .tracking(1.2)
-            .foregroundColor(.textSecondary)
-    }
+enum SRadius {
+    static let sm: CGFloat = 6
+    static let md: CGFloat = 8
+    static let lg: CGFloat = 12
 }
