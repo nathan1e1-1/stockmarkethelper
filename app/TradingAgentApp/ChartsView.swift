@@ -13,11 +13,12 @@ struct ChartsView: View {
                 query = query.uppercased()
             }
             .frame(maxWidth: 480)
+            .entrance()
 
             if query.isEmpty {
-                emptyState
+                emptyState.entrance(delay: 0.06)
             } else {
-                chart
+                chart.entrance(delay: 0.06)
             }
         }
         .padding(24)
@@ -130,6 +131,7 @@ struct ChartsView: View {
                             .foregroundStyle(Color.mutedForeground)
                     }
                 }
+                .animation(.easeInOut(duration: 0.5), value: bars.count)
                 .frame(height: 340)
             }
             .padding(20)

@@ -32,7 +32,7 @@ struct SButton: View {
                     .stroke(borderColor, lineWidth: borderColor == .clear ? 0 : 1)
             )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressableStyle())
     }
 
     private var foreground: Color {
@@ -295,5 +295,38 @@ struct SSectionLabel: View {
             .font(.caption.weight(.semibold))
             .tracking(1.2)
             .foregroundStyle(Color.mutedForeground)
+    }
+}
+
+// MARK: - Animation helpers
+
+struct PressableStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.97 : 1)
+            .opacity(configuration.isPressed ? 0.9 : 1)
+            .animation(.spring(response: 0.25, dampingFraction: 0.6), value: configuration.isPressed)
+    }
+}
+
+struct EntranceModifier: ViewModifier {
+    @State private var visible = false
+    var delay: Double = 0
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(visible ? 1 : 0)
+            .offset(y: visible ? 0 : 8)
+            .onAppear {
+                withAnimation(.easeOut(duration: 0.3).delay(delay)) {
+                    visible = true
+                }
+            }
+    }
+}
+
+extension View {
+    func entrance(delay: Double = 0) -> some View {
+        modifier(EntranceModifier(delay: delay))
     }
 }

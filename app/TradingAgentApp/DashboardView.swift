@@ -7,17 +7,17 @@ struct DashboardView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                statusLine
+                statusLine.entrance()
 
                 if let eq = client.status?.equity {
-                    equityHeader(eq)
-                    stats(eq)
-                    pnlChart(eq)
+                    equityHeader(eq).entrance(delay: 0.05)
+                    stats(eq).entrance(delay: 0.1)
+                    pnlChart(eq).entrance(delay: 0.15)
                 } else {
-                    waitingCard
+                    waitingCard.entrance(delay: 0.05)
                 }
 
-                alerts
+                alerts.entrance(delay: 0.2)
             }
             .padding(24)
             .frame(maxWidth: 920, alignment: .leading)

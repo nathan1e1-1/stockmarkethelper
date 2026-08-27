@@ -6,8 +6,8 @@ struct PositionsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                positionsSection
-                decisionsSection
+                positionsSection.entrance()
+                decisionsSection.entrance(delay: 0.08)
             }
             .padding(24)
             .frame(maxWidth: 920, alignment: .leading)

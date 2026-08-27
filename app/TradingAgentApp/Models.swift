@@ -27,6 +27,21 @@ struct EngineStatus: Codable {
     let equity_history: [EquityPoint]
     let kill_switch: Bool
     let daily_stop: Bool
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        equity = try c.decodeIfPresent(Equity.self, forKey: .equity)
+        positions = try c.decodeIfPresent([Position].self, forKey: .positions) ?? []
+        decisions = try c.decodeIfPresent([Decision].self, forKey: .decisions) ?? []
+        equity_history = try c.decodeIfPresent([EquityPoint].self, forKey: .equity_history) ?? []
+        kill_switch = try c.decodeIfPresent(Bool.self, forKey: .kill_switch) ?? false
+        daily_stop = try c.decodeIfPresent(Bool.self, forKey: .daily_stop) ?? false
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case equity, positions, decisions
+        case equity_history, kill_switch, daily_stop
+    }
 }
 
 struct EquityPoint: Codable, Identifiable {

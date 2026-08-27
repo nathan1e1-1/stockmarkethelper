@@ -13,6 +13,7 @@ struct SummaryView: View {
                         .font(.caption)
                         .foregroundStyle(Color.mutedForeground)
                 }
+                .entrance()
 
                 if client.summary.isEmpty {
                     SCard {
@@ -31,6 +32,7 @@ struct SummaryView: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 48)
                     }
+                    .entrance(delay: 0.08)
                 } else {
                     SCard {
                         Text(client.summary)
@@ -40,6 +42,7 @@ struct SummaryView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(20)
                     }
+                    .entrance(delay: 0.08)
                 }
             }
             .padding(24)
