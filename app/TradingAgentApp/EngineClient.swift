@@ -32,4 +32,17 @@ final class EngineClient: ObservableObject {
             connected = false
         }
     }
+
+    func bars(for ticker: String) async -> [Bar] {
+        var comps = URLComponents(url: baseURL.appending(path: "/api/bars"), resolvingAgainstBaseURL: false)
+        comps?.queryItems = [URLQueryItem(name: "ticker", value: ticker)]
+        guard let url = comps?.url else { return [] }
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            let resp = try JSONDecoder().decode([String: [Bar]].self, from: data)
+            return resp["bars"] ?? []
+        } catch {
+            return []
+        }
+    }
 }

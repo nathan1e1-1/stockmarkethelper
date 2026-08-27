@@ -21,3 +21,28 @@ def test_summary_endpoint():
     r = client.get("/api/summary")
     assert r.status_code == 200
     assert r.json()["summary"] == "Good day"
+
+
+def test_bars_endpoint_returns_bars():
+    class FakeProvider:
+        def bars(self, ticker, limit=80):
+            return [
+                {"t": "2026-08-26T14:00:00Z", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "volume": 1000},
+            ]
+
+    state = SharedState()
+    client = TestClient(create_app(state, provider=FakeProvider()))
+    r = client.get("/api/bars", params={"ticker": "AAPL"})
+    assert r.status_code == 200
+    bars = r.json()["bars"]
+    assert len(bars) == 1
+    assert bars[0]["open"] == 100.0
+    assert bars[0]["close"] == 100.5
+
+
+def test_bars_endpoint_empty_without_ticker():
+    state = SharedState()
+    client = TestClient(create_app(state))
+    r = client.get("/api/bars")
+    assert r.status_code == 200
+    assert r.json()["bars"] == []

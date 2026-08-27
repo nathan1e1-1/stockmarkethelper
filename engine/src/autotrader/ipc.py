@@ -15,7 +15,7 @@ class SharedState:
         self.risk = None
 
 
-def create_app(state: SharedState) -> FastAPI:
+def create_app(state: SharedState, provider=None) -> FastAPI:
     app = FastAPI()
 
     @app.get("/api/status")
@@ -33,5 +33,14 @@ def create_app(state: SharedState) -> FastAPI:
     @app.get("/api/summary")
     def summary() -> dict[str, str]:
         return {"summary": state.summary}
+
+    @app.get("/api/bars")
+    def bars(ticker: str = "", limit: int = 80) -> dict[str, Any]:
+        if not ticker or provider is None:
+            return {"bars": []}
+        try:
+            return {"bars": provider.bars(ticker.upper(), limit=limit)}
+        except Exception:
+            return {"bars": []}
 
     return app

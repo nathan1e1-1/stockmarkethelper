@@ -35,7 +35,7 @@ def main() -> None:
 
     runner = Runner(provider=provider, agent=agent, executor=executor, risk=risk, cfg=cfg, sentiment_llm=agent)
 
-    app = create_app(shared)
+    app = create_app(shared, provider=provider)
     if not args.once:
         threading.Thread(
             target=uvicorn.run,

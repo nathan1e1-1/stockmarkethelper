@@ -1,40 +1,15 @@
 import SwiftUI
 import Charts
 
-private struct PricePoint: Identifiable {
-    let id = UUID()
-    let index: Int
-    let price: Double
-}
-
 struct ChartsView: View {
+    @ObservedObject private var client = EngineClient.shared
     @State private var query = ""
+    @State private var bars: [Bar] = []
+    @State private var loading = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            HStack(spacing: 12) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundColor(.textSecondary)
-                TextField("Search ticker…", text: $query)
-                    .textFieldStyle(.plain)
-                    .font(.body)
-                    .foregroundColor(.textPrimary)
-                    .onSubmit { query = query.uppercased() }
-                if !query.isEmpty {
-                    Button { query = "" } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundColor(.textSecondary)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
-            .background(Color.surface)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Color.border, lineWidth: 1))
-            .frame(maxWidth: 480)
-
+            searchField
             if query.isEmpty {
                 emptyState
             } else {
@@ -45,6 +20,32 @@ struct ChartsView: View {
         .frame(maxWidth: 920, alignment: .leading)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.bg)
+        .task(id: query) { await load() }
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "magnifyingglass")
+                .foregroundColor(.textSecondary)
+            TextField("Search ticker…", text: $query)
+                .textFieldStyle(.plain)
+                .font(.body)
+                .foregroundColor(.textPrimary)
+                .onSubmit { query = query.uppercased() }
+            if !query.isEmpty {
+                Button { query = "" } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(.textSecondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(Color.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Color.border, lineWidth: 1))
+        .frame(maxWidth: 480)
     }
 
     private var emptyState: some View {
@@ -55,7 +56,7 @@ struct ChartsView: View {
             Text("Search a ticker")
                 .font(.title3.weight(.medium))
                 .foregroundColor(.textPrimary)
-            Text("Type a symbol like AAPL or NVDA to view its chart.")
+            Text("Type a symbol like AAPL or NVDA to view its candlestick chart.")
                 .font(.callout)
                 .foregroundColor(.textSecondary)
         }
@@ -64,49 +65,75 @@ struct ChartsView: View {
         .card()
     }
 
+    @ViewBuilder
     private var chart: some View {
-        let points = sampleData(for: query)
-        let minPrice = points.map(\.price).min() ?? 0
-        let current = points.last?.price ?? 0
+        if loading && bars.isEmpty {
+            VStack(spacing: 12) {
+                ProgressView().controlSize(.large)
+                Text("Loading bars…").font(.callout).foregroundColor(.textSecondary)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 60)
+            .card()
+        } else if bars.isEmpty {
+            VStack(spacing: 12) {
+                Image(systemName: "chart.bar.xaxis")
+                    .font(.system(size: 28))
+                    .foregroundColor(.textSecondary)
+                Text("No data for \(query)")
+                    .font(.title3.weight(.medium))
+                    .foregroundColor(.textPrimary)
+                Text("The engine may be offline or the ticker returned no bars.")
+                    .font(.callout)
+                    .foregroundColor(.textSecondary)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 48)
+            .card()
+        } else {
+            candleChart
+        }
+    }
+
+    private var candleChart: some View {
+        let last = bars.last
 
         return VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline) {
                 Text(query).font(.title2.weight(.bold)).foregroundColor(.textPrimary)
-                Text(current, format: .currency(code: "USD"))
-                    .font(.title2.weight(.semibold))
-                    .monospacedDigit()
-                    .foregroundColor(.accent)
+                if let last {
+                    let change = last.c - last.o
+                    Text(last.c, format: .currency(code: "USD"))
+                        .font(.title2.weight(.semibold))
+                        .monospacedDigit()
+                        .foregroundColor(change >= 0 ? .gain : .loss)
+                }
                 Spacer()
-                Text("Preview data")
+                Text("1-min bars · live")
                     .font(.caption)
                     .foregroundColor(.textSecondary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(Color.warn.opacity(0.15))
-                    .foregroundColor(.warn)
-                    .clipShape(Capsule())
             }
 
-            Chart(points) { point in
-                AreaMark(
-                    x: .value("Time", point.index),
-                    yStart: .value("Price", minPrice),
-                    yEnd: .value("Price", point.price)
-                )
-                .foregroundStyle(
-                    LinearGradient(
-                        colors: [Color.accent.opacity(0.25), Color.accent.opacity(0.0)],
-                        startPoint: .top,
-                        endPoint: .bottom
+            Chart {
+                ForEach(bars) { bar in
+                    RectangleMark(
+                        x: .value("Time", bar.date),
+                        yStart: .value("Open", bar.o),
+                        yEnd: .value("Close", bar.c),
+                        width: .fixed(6)
                     )
-                )
-                .interpolationMethod(.catmullRom)
+                    .foregroundStyle(bar.c >= bar.o ? Color.gain : Color.loss)
 
-                LineMark(x: .value("Time", point.index), y: .value("Price", point.price))
-                    .foregroundStyle(Color.accent)
-                    .lineStyle(StrokeStyle(lineWidth: 2))
-                    .interpolationMethod(.catmullRom)
+                    RuleMark(
+                        x: .value("Time", bar.date),
+                        yStart: .value("Low", bar.l),
+                        yEnd: .value("High", bar.h)
+                    )
+                    .lineStyle(StrokeStyle(lineWidth: 1))
+                    .foregroundStyle(bar.c >= bar.o ? Color.gain : Color.loss)
+                }
             }
+            .chartYScale(domain: .automatic(includesZero: false))
             .chartYAxis {
                 AxisMarks(position: .leading) { _ in
                     AxisGridLine().foregroundStyle(Color.border)
@@ -116,28 +143,19 @@ struct ChartsView: View {
             .chartXAxis {
                 AxisMarks { _ in
                     AxisGridLine().foregroundStyle(Color.border)
-                    AxisValueLabel().foregroundStyle(Color.textSecondary)
+                    AxisValueLabel(format: .dateTime.hour(.twoDigits(amPM: .omitted)).minute())
+                        .foregroundStyle(Color.textSecondary)
                 }
             }
-            .frame(height: 320)
-
-            Text("Chart data is a preview. Live bars from the engine will replace this once the chart endpoint is wired.")
-                .font(.caption)
-                .foregroundColor(.textSecondary)
+            .frame(height: 340)
         }
         .card()
     }
 
-    private func sampleData(for ticker: String) -> [PricePoint] {
-        var seed = 100.0 + Double(ticker.unicodeScalars.reduce(0) { $0 + Int($1.value) } % 2000) / 10.0
-        var rng = Double(ticker.unicodeScalars.reduce(0) { $0 + Int($1.value) })
-        var points: [PricePoint] = []
-        for i in 0..<80 {
-            rng = (rng * 110.3515245 + 12345).truncatingRemainder(dividingBy: 98765)
-            let drift = (rng / 98765.0 - 0.5) * 4.0
-            seed = max(1.0, seed + drift)
-            points.append(PricePoint(index: i, price: seed))
-        }
-        return points
+    private func load() async {
+        guard !query.isEmpty else { bars = []; return }
+        loading = true
+        bars = await client.bars(for: query)
+        loading = false
     }
 }

@@ -27,3 +27,35 @@ struct EngineStatus: Codable {
     let kill_switch: Bool
     let daily_stop: Bool
 }
+
+struct Bar: Codable, Identifiable {
+    let t: String
+    let o: Double
+    let h: Double
+    let l: Double
+    let c: Double
+    let v: Double
+
+    var id: String { t }
+
+    var date: Date {
+        Bar.dateFormatter.date(from: t) ?? Date(timeIntervalSince1970: 0)
+    }
+
+    private static let dateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(secondsFromGMT: 0)
+        f.dateFormat = "yyyy-MM-dd'T'HH:mm:ssXXXXX"
+        return f
+    }()
+
+    enum CodingKeys: String, CodingKey {
+        case t
+        case o = "open"
+        case h = "high"
+        case l = "low"
+        case c = "close"
+        case v = "volume"
+    }
+}

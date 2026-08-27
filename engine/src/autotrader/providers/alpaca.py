@@ -34,7 +34,17 @@ class AlpacaProvider:
         start = end - timedelta(days=7)
         req = StockBarsRequest(symbol_or_symbols=[ticker], timeframe=TimeFrame.Minute, start=start, end=end, limit=limit, feed=DataFeed.IEX)
         bars = self._data.get_stock_bars(req)[ticker]
-        return [{"t": b.timestamp.isoformat(), "close": float(b.close)} for b in bars]
+        return [
+            {
+                "t": b.timestamp.isoformat(),
+                "open": float(b.open),
+                "high": float(b.high),
+                "low": float(b.low),
+                "close": float(b.close),
+                "volume": float(b.volume),
+            }
+            for b in bars
+        ]
 
     def news(self, ticker: str, limit: int = 5) -> list[dict]:
         req = NewsRequest(symbols=ticker, limit=limit)
