@@ -68,6 +68,7 @@ def main() -> None:
         shared.positions = executor.positions()
         shared.decisions = runner.decisions
         shared.risk = risk
+        shared.equity_history.append({"t": time.time(), "equity": equity})
         store.save(State(equity=runner.equity, positions=risk.positions, decisions=runner.decisions, closed_trades=runner.closed_trades))
 
     def generate_summary() -> None:
@@ -102,6 +103,7 @@ def main() -> None:
             runner.decisions = []
             runner.closed_trades = []
             runner.flattened = False
+            shared.equity_history = []
             equity = executor.get_equity()
             risk.day_start_equity = equity
             risk.peak_equity = max(risk.peak_equity, equity)

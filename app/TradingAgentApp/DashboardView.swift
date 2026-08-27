@@ -1,4 +1,5 @@
 import SwiftUI
+import Charts
 
 struct DashboardView: View {
     @ObservedObject private var client = EngineClient.shared
@@ -11,6 +12,7 @@ struct DashboardView: View {
                 if let eq = client.status?.equity {
                     equityHeader(eq)
                     stats(eq)
+                    pnlChart(eq)
                 } else {
                     waitingCard
                 }
@@ -105,6 +107,64 @@ struct DashboardView: View {
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 40)
+        }
+    }
+
+    private func pnlChart(_ eq: Equity) -> some View {
+        let history = client.status?.equity_history ?? []
+        let dayStart = eq.day_start_equity
+
+        return SCard {
+            VStack(alignment: .leading, spacing: 12) {
+                SCardHeader(title: "P&L today", subtitle: "Cumulative profit/loss vs day start")
+
+                if history.count < 2 {
+                    Text("Not enough data yet — history accumulates during market hours.")
+                        .font(.callout)
+                        .foregroundStyle(Color.mutedForeground)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.vertical, 24)
+                } else {
+                    let lastPnl = (history.last?.equity ?? dayStart) - dayStart
+                    let color = lastPnl >= 0 ? Color.gain : Color.loss
+
+                    Chart(history) { point in
+                        AreaMark(
+                            x: .value("Time", point.date),
+                            yStart: .value("P&L", 0.0),
+                            yEnd: .value("P&L", point.equity - dayStart)
+                        )
+                        .interpolationMethod(.monotone)
+                        .foregroundStyle(
+                            LinearGradient(colors: [color.opacity(0.25), .clear], startPoint: .top, endPoint: .bottom)
+                        )
+
+                        LineMark(x: .value("Time", point.date), y: .value("P&L", point.equity - dayStart))
+                            .interpolationMethod(.monotone)
+                            .foregroundStyle(color)
+
+                        RuleMark(y: .value("Zero", 0.0))
+                            .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                            .foregroundStyle(Color.border)
+                    }
+                    .chartYAxis {
+                        AxisMarks(position: .leading) { _ in
+                            AxisGridLine().foregroundStyle(Color.border)
+                            AxisValueLabel(format: .currency(code: "USD").precision(.fractionLength(0)))
+                                .foregroundStyle(Color.mutedForeground)
+                        }
+                    }
+                    .chartXAxis {
+                        AxisMarks { _ in
+                            AxisGridLine().foregroundStyle(Color.border)
+                            AxisValueLabel(format: .dateTime.hour(.twoDigits(amPM: .omitted)).minute())
+                                .foregroundStyle(Color.mutedForeground)
+                        }
+                    }
+                    .frame(height: 220)
+                }
+            }
+            .padding(20)
         }
     }
 

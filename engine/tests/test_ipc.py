@@ -14,6 +14,19 @@ def test_status_endpoint():
     assert body["kill_switch"] is False
 
 
+def test_status_includes_equity_history():
+    state = SharedState()
+    state.equity = Equity(equity=99000.0, day_start_equity=100000.0, peak_equity=100000.0, day="d")
+    state.equity_history = [
+        {"t": 1780000000.0, "equity": 100000.0},
+        {"t": 1780000060.0, "equity": 99000.0},
+    ]
+    client = TestClient(create_app(state))
+    r = client.get("/api/status")
+    assert r.status_code == 200
+    assert r.json()["equity_history"] == state.equity_history
+
+
 def test_summary_endpoint():
     state = SharedState()
     state.summary = "Good day"

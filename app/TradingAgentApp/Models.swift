@@ -24,8 +24,17 @@ struct EngineStatus: Codable {
     let equity: Equity?
     let positions: [Position]
     let decisions: [Decision]
+    let equity_history: [EquityPoint]
     let kill_switch: Bool
     let daily_stop: Bool
+}
+
+struct EquityPoint: Codable, Identifiable {
+    let t: Double
+    let equity: Double
+
+    var id: Double { t }
+    var date: Date { Date(timeIntervalSince1970: t) }
 }
 
 struct Bar: Codable, Identifiable {
