@@ -105,6 +105,8 @@ def main() -> None:
                 runner.closed_trades = []
                 runner.flattened = False
                 shared.equity_history = []
+                universe[:] = build_universe(provider, size=cfg.universe_size, min_volume=cfg.min_volume, tickers_only=True)
+                print(f"Universe: {universe}")
                 equity = executor.get_equity()
                 risk.day_start_equity = equity
                 risk.peak_equity = max(risk.peak_equity, equity)
