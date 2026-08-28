@@ -61,4 +61,5 @@ pnpm-lock.yaml
 
 # runtime journal
 state/
+*.log
 app/TradingAgentApp.app/
