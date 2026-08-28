@@ -97,22 +97,25 @@ def main() -> None:
         now = datetime.now(EASTERN)
         day = now.strftime("%Y-%m-%d")
 
-        if day != current_day:
-            current_day = day
-            summary_done = False
-            runner.decisions = []
-            runner.closed_trades = []
-            runner.flattened = False
-            shared.equity_history = []
-            equity = executor.get_equity()
-            risk.day_start_equity = equity
-            risk.peak_equity = max(risk.peak_equity, equity)
+        try:
+            if day != current_day:
+                current_day = day
+                summary_done = False
+                runner.decisions = []
+                runner.closed_trades = []
+                runner.flattened = False
+                shared.equity_history = []
+                equity = executor.get_equity()
+                risk.day_start_equity = equity
+                risk.peak_equity = max(risk.peak_equity, equity)
 
-        if is_market_open(now):
-            sync_and_scan(day)
-        elif is_after_close(now) and not summary_done:
-            generate_summary()
-            summary_done = True
+            if is_market_open(now):
+                sync_and_scan(day)
+            elif is_after_close(now) and not summary_done:
+                generate_summary()
+                summary_done = True
+        except Exception as e:
+            print(f"[error] main loop: {e}")
 
         time.sleep(cfg.scan_interval_seconds)
 

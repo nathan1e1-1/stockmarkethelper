@@ -88,3 +88,17 @@ def test_manage_exits_no_trigger_when_within_band():
     runner.manage_exits()
     assert ex.sold == []
     assert runner.closed_trades == []
+
+
+def test_runner_skips_bad_ticker_and_continues():
+    class BadTickerProvider(FixtureProvider):
+        def bars(self, ticker, limit=50):
+            if ticker == "BAD":
+                raise RuntimeError("no data")
+            return super().bars(ticker, limit)
+
+    ex = FakeExec()
+    runner = Runner(provider=BadTickerProvider(), agent=BuyAgent(), executor=ex, risk=None, cfg=None)
+    runner.equity = Equity(equity=100000.0, day_start_equity=100000.0, peak_equity=100000.0, day="d")
+    runner.run_once(universe=["BAD", "AAPL"])
+    assert len(ex.submitted) >= 1

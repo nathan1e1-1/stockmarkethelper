@@ -44,39 +44,46 @@ class Runner:
             return
         threshold = self.cfg.entry_threshold if self.cfg else 0.5
         for ticker in universe:
-            ss = self.compute_signalset(ticker)
-            sigs = ", ".join(f"{s.name}={s.value}" for s in ss.signals)
-            print(f"[scan] {ticker}: composite={ss.composite} regime={ss.regime} signals=[{sigs}]")
-            if ss.composite < threshold:
-                print(f"[scan] {ticker}: below threshold {threshold}, skipping")
+            try:
+                ss = self.compute_signalset(ticker)
+                sigs = ", ".join(f"{s.name}={s.value}" for s in ss.signals)
+                print(f"[scan] {ticker}: composite={ss.composite} regime={ss.regime} signals=[{sigs}]")
+                if ss.composite < threshold:
+                    print(f"[scan] {ticker}: below threshold {threshold}, skipping")
+                    continue
+                decision = self.agent.decide(ss)
+                self.decisions.append(decision)
+                print(f"[scan] {ticker}: decision={decision.decision.value} confidence={decision.confidence} rationale={decision.rationale!r}")
+                if decision.decision is not Decision.BUY:
+                    continue
+                if self.risk and not self.risk.can_enter(ticker):
+                    print(f"[scan] {ticker}: risk blocked (max positions or duplicate)")
+                    continue
+                price = self.provider.latest_price(ticker)
+                qty = self.risk.position_size(ticker, price, self.equity.equity) if self.risk else 0
+                self.executor.market_order(ticker, qty, Side.BUY)
+                print(f"[order] BUY {ticker} x{qty} @ {price}")
+            except Exception as e:
+                print(f"[error] {ticker}: {e}")
                 continue
-            decision = self.agent.decide(ss)
-            self.decisions.append(decision)
-            print(f"[scan] {ticker}: decision={decision.decision.value} confidence={decision.confidence} rationale={decision.rationale!r}")
-            if decision.decision is not Decision.BUY:
-                continue
-            if self.risk and not self.risk.can_enter(ticker):
-                print(f"[scan] {ticker}: risk blocked (max positions or duplicate)")
-                continue
-            price = self.provider.latest_price(ticker)
-            qty = self.risk.position_size(ticker, price, self.equity.equity) if self.risk else 0
-            self.executor.market_order(ticker, qty, Side.BUY)
-            print(f"[order] BUY {ticker} x{qty} @ {price}")
 
     def manage_exits(self, flatten_time=None, now=None) -> None:
         if self.exit_manager is None or self.risk is None:
             return
-        if flatten_time and now and now.astimezone(EASTERN).time() >= flatten_time and not self.flattened:
+        try:
+            if flatten_time and now and now.astimezone(EASTERN).time() >= flatten_time and not self.flattened:
+                for pos in list(self.risk.positions):
+                    price = self.provider.latest_price(pos.ticker)
+                    self._close(pos, price, "flatten")
+                self.flattened = True
+                return
             for pos in list(self.risk.positions):
                 price = self.provider.latest_price(pos.ticker)
-                self._close(pos, price, "flatten")
-            self.flattened = True
-            return
-        for pos in list(self.risk.positions):
-            price = self.provider.latest_price(pos.ticker)
-            reason = self.exit_manager.evaluate(pos, price)
-            if reason:
-                self._close(pos, price, reason)
+                reason = self.exit_manager.evaluate(pos, price)
+                if reason:
+                    self._close(pos, price, reason)
+        except Exception as e:
+            print(f"[error] manage_exits: {e}")
 
     def _close(self, pos, price: float, reason: str) -> None:
         qty = int(pos.qty)
