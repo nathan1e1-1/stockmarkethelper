@@ -34,6 +34,10 @@ def _decode_decision(d: dict) -> AgentDecision:
     )
 
 
+def same_day(state: State, day: str) -> bool:
+    return state.equity is not None and state.equity.day == day
+
+
 class StateStore:
     def __init__(self, directory: Path | str):
         self.path = Path(directory) / "state.json"

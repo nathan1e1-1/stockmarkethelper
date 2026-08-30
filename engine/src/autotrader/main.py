@@ -14,7 +14,7 @@ from autotrader.models import Equity
 from autotrader.providers.alpaca import AlpacaProvider
 from autotrader.risk import RiskManager
 from autotrader.runner import Runner
-from autotrader.state import State, StateStore
+from autotrader.state import State, StateStore, same_day
 from autotrader.summary import daily_summary
 from autotrader.universe import build_universe
 
@@ -98,6 +98,17 @@ def main() -> None:
 
     current_day = None
     summary_done = False
+
+    startup_day = datetime.now(EASTERN).strftime("%Y-%m-%d")
+    loaded = store.load()
+    if same_day(loaded, startup_day):
+        runner.decisions = loaded.decisions
+        runner.closed_trades = loaded.closed_trades
+        risk.day_start_equity = loaded.equity.day_start_equity
+        risk.peak_equity = max(loaded.equity.peak_equity, risk.peak_equity)
+        current_day = startup_day
+        print(f"[reload] restored {len(runner.decisions)} decisions, {len(runner.closed_trades)} closed trades")
+
     while True:
         now = datetime.now(EASTERN)
         day = now.strftime("%Y-%m-%d")

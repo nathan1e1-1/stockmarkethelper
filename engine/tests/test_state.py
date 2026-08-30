@@ -47,3 +47,20 @@ def test_save_survives_disk_full(tmp_path, monkeypatch):
     eq = Equity(equity=98000.0, day_start_equity=100000.0, peak_equity=100000.0, day="2026-08-25")
     monkeypatch.setattr(Path, "write_text", boom)
     store.save(State(equity=eq))  # must not raise
+
+
+def test_same_day_true_when_equity_day_matches():
+    from autotrader.state import same_day
+    state = State(equity=Equity(equity=100000.0, day_start_equity=100000.0, peak_equity=100000.0, day="2026-08-28"))
+    assert same_day(state, "2026-08-28") is True
+
+
+def test_same_day_false_when_different_day():
+    from autotrader.state import same_day
+    state = State(equity=Equity(equity=100000.0, day_start_equity=100000.0, peak_equity=100000.0, day="2026-08-27"))
+    assert same_day(state, "2026-08-28") is False
+
+
+def test_same_day_false_without_equity():
+    from autotrader.state import same_day
+    assert same_day(State(), "2026-08-28") is False
