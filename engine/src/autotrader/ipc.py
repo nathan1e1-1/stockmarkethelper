@@ -7,6 +7,8 @@ from pydantic import BaseModel, Field, field_validator
 from autotrader.history import HistoryRange
 from autotrader.models import Equity
 
+_UNAVAILABLE_LLM_RESPONSE = "Daily summary unavailable."
+
 
 class SharedState:
     def __init__(self):
@@ -111,12 +113,16 @@ def create_app(state: SharedState, provider=None, llm=None) -> FastAPI:
         prompt = (
             "Answer the user's question using the factual context below. This is an "
             "informational/read-only assistant: no orders, no promised returns, never "
-            "disable or bypass risk controls, and say when data is missing.\n\n"
+            "disable or bypass risk controls, do not recommend, suggest, or imply BUY, "
+            "SELL, or order action, and say when data is missing.\n\n"
             f"Factual context:\n{_chat_context(state)}\n\n"
             f"User question: {request.question}"
         )
         try:
-            return {"answer": str(llm.complete(prompt))}
+            answer = str(llm.complete(prompt))
+            if answer.strip() == _UNAVAILABLE_LLM_RESPONSE:
+                raise RuntimeError("llm unavailable")
+            return {"answer": answer}
         except Exception as error:
             raise HTTPException(
                 status_code=503,

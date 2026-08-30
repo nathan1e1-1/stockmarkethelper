@@ -159,20 +159,25 @@ def test_chat_endpoint_uses_read_only_factual_context_and_user_question():
     llm = FakeLLM()
     client = TestClient(create_app(state, llm=llm))
 
-    response = client.post("/api/chat", json={"question": "What is the current account state?"})
+    response = client.post("/api/chat", json={"question": "  What is the current account state?  "})
 
     assert response.status_code == 200
     assert response.json() == {"answer": "A cautious, informational answer."}
     prompt = llm.prompts[0]
-    assert "What is the current account state?" in prompt
+    assert "User question: What is the current account state?" in prompt
     assert "equity=99000.0" in prompt
     assert "AAPL" in prompt
     assert "kill_switch=True" in prompt
+    assert "daily_stop=False" in prompt
+    assert "decision=Decision.HOLD" in prompt
+    assert "confidence=0.4" in prompt
+    assert "mixed signals" in prompt
     assert "No completed trades yet." in prompt
     assert "informational/read-only" in prompt
     assert "no orders" in prompt
     assert "no promised returns" in prompt
     assert "never disable or bypass risk" in prompt
+    assert "do not recommend, suggest, or imply BUY, SELL, or order action" in prompt
     assert "say when data is missing" in prompt
 
 
@@ -192,6 +197,19 @@ def test_chat_endpoint_rejects_question_over_2000_characters():
     assert response.status_code == 422
 
 
+def test_chat_endpoint_accepts_question_at_2000_character_limit():
+    class FakeLLM:
+        def complete(self, prompt):
+            return "Within the limit."
+
+    client = TestClient(create_app(SharedState(), llm=FakeLLM()))
+
+    response = client.post("/api/chat", json={"question": "x" * 2000})
+
+    assert response.status_code == 200
+    assert response.json() == {"answer": "Within the limit."}
+
+
 def test_chat_endpoint_returns_safe_retry_error_when_llm_missing():
     client = TestClient(create_app(SharedState()))
 
@@ -207,6 +225,19 @@ def test_chat_endpoint_returns_safe_retry_error_when_llm_fails():
             raise RuntimeError("connection refused")
 
     client = TestClient(create_app(SharedState(), llm=FailingLLM()))
+
+    response = client.post("/api/chat", json={"question": "How is the account?"})
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Assistant is temporarily unavailable. Please try again shortly."
+
+
+def test_chat_endpoint_returns_safe_retry_error_for_ollama_unavailable_sentinel():
+    class SentinelLLM:
+        def complete(self, prompt):
+            return "Daily summary unavailable."
+
+    client = TestClient(create_app(SharedState(), llm=SentinelLLM()))
 
     response = client.post("/api/chat", json={"question": "How is the account?"})
 
