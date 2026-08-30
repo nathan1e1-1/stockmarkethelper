@@ -43,7 +43,7 @@ def main() -> None:
             daemon=True,
         ).start()
 
-    universe = build_universe(provider, size=cfg.universe_size, min_volume=cfg.min_volume, tickers_only=True)
+    universe = build_universe(provider, size=cfg.universe_size, min_price=cfg.min_price, min_volume=cfg.min_volume, tickers_only=True)
     print(f"Universe: {universe}")
 
     equity = executor.get_equity()
@@ -51,8 +51,13 @@ def main() -> None:
     risk.peak_equity = equity
 
     flatten_time = datetime.strptime(cfg.flatten_time, "%H:%M").time() if cfg.flatten_at_close else None
+    reconciled = False
 
     def sync_and_scan(day: str) -> None:
+        nonlocal reconciled
+        if not args.once and not reconciled:
+            runner.reconcile()
+            reconciled = True
         equity = executor.get_equity()
         risk.peak_equity = max(risk.peak_equity, equity)
         risk.positions = executor.positions()
@@ -101,11 +106,12 @@ def main() -> None:
             if day != current_day:
                 current_day = day
                 summary_done = False
+                reconciled = False
                 runner.decisions = []
                 runner.closed_trades = []
                 runner.flattened = False
                 shared.equity_history = []
-                universe[:] = build_universe(provider, size=cfg.universe_size, min_volume=cfg.min_volume, tickers_only=True)
+                universe[:] = build_universe(provider, size=cfg.universe_size, min_price=cfg.min_price, min_volume=cfg.min_volume, tickers_only=True)
                 print(f"Universe: {universe}")
                 equity = executor.get_equity()
                 risk.day_start_equity = equity

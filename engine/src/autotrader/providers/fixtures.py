@@ -4,6 +4,9 @@ class FixtureProvider:
     def latest_price(self, ticker: str) -> float:
         return 190.0
 
+    def latest_prices(self, tickers: list[str]) -> dict[str, float]:
+        return {t: self.latest_price(t) for t in tickers}
+
     def bars(self, ticker: str, limit: int = 50) -> list[dict]:
         # Clean uptrend so momentum is strongly positive.
         return [

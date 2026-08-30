@@ -102,3 +102,33 @@ def test_runner_skips_bad_ticker_and_continues():
     runner.equity = Equity(equity=100000.0, day_start_equity=100000.0, peak_equity=100000.0, day="d")
     runner.run_once(universe=["BAD", "AAPL"])
     assert len(ex.submitted) >= 1
+
+
+def test_reconcile_closes_stale_positions():
+    class ReconcileExec:
+        def __init__(self, positions):
+            self._positions = positions
+            self.sold = []
+
+        def positions(self):
+            return self._positions
+
+        def sell(self, ticker, qty):
+            self.sold.append((ticker, qty))
+
+    ex = ReconcileExec([Position(ticker="INTC", qty=22.0, avg_entry_price=90.9)])
+    runner = Runner(provider=FixtureProvider(), agent=None, executor=ex, risk=None, cfg=None)
+    runner.reconcile()
+    assert ex.sold == [("INTC", 22)]
+
+
+def test_reconcile_no_positions_is_noop():
+    class EmptyExec:
+        def positions(self):
+            return []
+
+        def sell(self, ticker, qty):
+            raise AssertionError("should not sell")
+
+    runner = Runner(provider=FixtureProvider(), agent=None, executor=EmptyExec(), risk=None, cfg=None)
+    runner.reconcile()  # must not raise or sell

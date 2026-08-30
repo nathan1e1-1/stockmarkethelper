@@ -67,6 +67,20 @@ class Runner:
                 print(f"[error] {ticker}: {e}")
                 continue
 
+    def reconcile(self) -> None:
+        if self.executor is None:
+            return
+        positions = self.executor.positions()
+        if not positions:
+            return
+        print(f"[reconcile] closing {len(positions)} stale positions")
+        for pos in positions:
+            try:
+                self.executor.sell(pos.ticker, int(pos.qty))
+                print(f"[reconcile] closed {pos.ticker}")
+            except Exception as e:
+                print(f"[reconcile] failed to close {pos.ticker}: {e}")
+
     def manage_exits(self, flatten_time=None, now=None) -> None:
         if self.exit_manager is None or self.risk is None:
             return

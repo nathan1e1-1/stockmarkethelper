@@ -29,6 +29,13 @@ class AlpacaProvider:
         trade = self._data.get_stock_latest_trade(req)[ticker]
         return float(trade.price)
 
+    def latest_prices(self, tickers: list[str]) -> dict[str, float]:
+        if not tickers:
+            return {}
+        req = StockLatestTradeRequest(symbol_or_symbols=tickers, feed=DataFeed.IEX)
+        trades = self._data.get_stock_latest_trade(req)
+        return {t: float(v.price) for t, v in trades.items()}
+
     def bars(self, ticker: str, limit: int = 50) -> list[dict]:
         end = datetime.now(timezone.utc)
         start = end - timedelta(days=7)
