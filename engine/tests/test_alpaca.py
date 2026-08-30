@@ -1,4 +1,10 @@
 from autotrader.providers.fixtures import FixtureProvider
+from datetime import datetime, timezone
+
+from alpaca.data.timeframe import TimeFrameUnit
+
+from autotrader.history import HistoryRange
+from autotrader.providers.alpaca import AlpacaProvider
 
 
 def test_fixture_provider_latest_price():
@@ -18,3 +24,98 @@ def test_fixture_provider_news():
     news = p.news("AAPL", limit=5)
     assert len(news) == 5
     assert all("headline" in n for n in news)
+
+
+class FakeAsset:
+    def __init__(self, symbol, name, tradable=True):
+        self.symbol = symbol
+        self.name = name
+        self.tradable = tradable
+
+
+class FakeTradingClient:
+    def __init__(self, assets):
+        self.assets = assets
+        self.requests = []
+
+    def get_all_assets(self, request):
+        self.requests.append(request)
+        return self.assets
+
+
+class FakeBar:
+    def __init__(self, timestamp, close):
+        self.timestamp = timestamp
+        self.open = close - 1
+        self.high = close + 1
+        self.low = close - 2
+        self.close = close
+        self.volume = 100
+
+
+class FakeDataClient:
+    def __init__(self, bars):
+        self.bars = bars
+        self.requests = []
+
+    def get_stock_bars(self, request):
+        self.requests.append(request)
+        return {"AAPL": self.bars}
+
+
+def provider_with(data=None, trading=None):
+    provider = object.__new__(AlpacaProvider)
+    provider._data = data
+    provider._trading = trading
+    provider._asset_search_cache = None
+    return provider
+
+
+def test_search_assets_filters_tradable_active_equities_and_caches_result():
+    trading = FakeTradingClient(
+        [
+            FakeAsset("MSFT", "Microsoft Corporation"),
+            FakeAsset("MSTR", "MicroStrategy Incorporated"),
+            FakeAsset("META", "Meta Platforms", tradable=False),
+        ]
+    )
+    provider = provider_with(trading=trading)
+
+    first = provider.search_assets("mic", limit=1)
+    second = provider.search_assets("m", limit=10)
+
+    assert first == [{"ticker": "MSFT", "name": "Microsoft Corporation"}]
+    assert second == [
+        {"ticker": "MSFT", "name": "Microsoft Corporation"},
+        {"ticker": "MSTR", "name": "MicroStrategy Incorporated"},
+    ]
+    assert len(trading.requests) == 1
+    request = trading.requests[0]
+    assert request.status.value == "active"
+    assert request.asset_class.value == "us_equity"
+
+
+def test_bars_builds_max_range_request_and_thins_ohlcv_results():
+    bars = [
+        FakeBar(datetime(1970, 1, 1, tzinfo=timezone.utc), 100.0),
+        FakeBar(datetime(2026, 8, 30, tzinfo=timezone.utc), 200.0),
+    ]
+    data = FakeDataClient(bars)
+    provider = provider_with(data=data)
+
+    result = provider.bars("AAPL", HistoryRange.MAX)
+
+    request = data.requests[0]
+    assert request.timeframe.amount == 1
+    assert request.timeframe.unit is TimeFrameUnit.Day
+    assert request.start == datetime(1970, 1, 1)
+    assert request.limit is None
+    assert result[0] == {
+        "t": "1970-01-01T00:00:00+00:00",
+        "open": 99.0,
+        "high": 101.0,
+        "low": 98.0,
+        "close": 100.0,
+        "volume": 100.0,
+    }
+    assert result[-1]["t"] == "2026-08-30T00:00:00+00:00"
