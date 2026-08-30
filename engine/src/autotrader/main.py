@@ -50,6 +50,17 @@ def main() -> None:
     risk.day_start_equity = equity
     risk.peak_equity = equity
 
+    # Publish initial state so the UI shows account data immediately, even outside market hours.
+    runner.equity = Equity(
+        equity=equity,
+        day_start_equity=equity,
+        peak_equity=equity,
+        day=datetime.now(EASTERN).strftime("%Y-%m-%d"),
+    )
+    shared.equity = runner.equity
+    shared.positions = executor.positions()
+    shared.risk = risk
+
     flatten_time = datetime.strptime(cfg.flatten_time, "%H:%M").time() if cfg.flatten_at_close else None
     reconciled = False
 
