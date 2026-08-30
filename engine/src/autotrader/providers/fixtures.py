@@ -1,3 +1,8 @@
+from datetime import datetime, timedelta, timezone
+
+from autotrader.history import HistoryRange, HistoryRequest
+
+
 class FixtureProvider:
     """Deterministic in-memory provider for tests and replay."""
 
@@ -7,11 +12,37 @@ class FixtureProvider:
     def latest_prices(self, tickers: list[str]) -> dict[str, float]:
         return {t: self.latest_price(t) for t in tickers}
 
-    def bars(self, ticker: str, limit: int = 50) -> list[dict]:
+    def search_assets(self, query: str, limit: int = 10) -> list[dict]:
+        assets = [
+            {"ticker": "AAPL", "name": "Apple Inc."},
+            {"ticker": "MSFT", "name": "Microsoft Corporation"},
+        ]
+        normalized_query = query.casefold()
+        matches = [
+            asset
+            for asset in assets
+            if normalized_query in asset["ticker"].casefold()
+            or normalized_query in asset["name"].casefold()
+        ]
+        matches.sort(
+            key=lambda asset: (
+                normalized_query not in asset["ticker"].casefold(),
+                asset["ticker"],
+            )
+        )
+        return matches[:limit]
+
+    def bars(
+        self,
+        ticker: str,
+        history_range: HistoryRange = HistoryRange.ONE_DAY,
+    ) -> list[dict]:
         # Clean uptrend so momentum is strongly positive.
+        request = HistoryRequest.for_range(history_range)
+        start = datetime(2026, 8, 25, tzinfo=timezone.utc)
         return [
-            {"t": f"2026-08-25T13:{i:02d}:00Z", "close": 100.0 + i}
-            for i in range(limit)
+            {"t": (start + timedelta(minutes=i)).isoformat(), "close": 100.0 + i}
+            for i in range(request.max_bars)
         ]
 
     def news(self, ticker: str, limit: int = 5) -> list[dict]:

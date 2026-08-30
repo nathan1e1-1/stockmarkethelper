@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+from autotrader.history import HistoryRange
 from autotrader.ipc import create_app, SharedState
 from autotrader.models import Equity
 
@@ -38,19 +39,25 @@ def test_summary_endpoint():
 
 def test_bars_endpoint_returns_bars():
     class FakeProvider:
-        def bars(self, ticker, limit=80):
+        def __init__(self):
+            self.calls = []
+
+        def bars(self, ticker, history_range=HistoryRange.ONE_DAY):
+            self.calls.append((ticker, history_range))
             return [
                 {"t": "2026-08-26T14:00:00Z", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "volume": 1000},
             ]
 
     state = SharedState()
-    client = TestClient(create_app(state, provider=FakeProvider()))
+    provider = FakeProvider()
+    client = TestClient(create_app(state, provider=provider))
     r = client.get("/api/bars", params={"ticker": "AAPL"})
     assert r.status_code == 200
     bars = r.json()["bars"]
     assert len(bars) == 1
     assert bars[0]["open"] == 100.0
     assert bars[0]["close"] == 100.5
+    assert provider.calls == [("AAPL", HistoryRange.ONE_DAY)]
 
 
 def test_bars_endpoint_empty_without_ticker():

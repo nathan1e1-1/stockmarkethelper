@@ -14,9 +14,15 @@ def test_fixture_provider_latest_price():
 
 def test_fixture_provider_bars_length():
     p = FixtureProvider()
-    bars = p.bars("AAPL", limit=50)
-    assert len(bars) == 50
+    bars = p.bars("AAPL", history_range=HistoryRange.ONE_DAY)
+    assert len(bars) == 390
     assert all(b["close"] > 0 for b in bars)
+
+
+def test_fixture_provider_search_assets_matches_ticker_or_name():
+    p = FixtureProvider()
+
+    assert p.search_assets("app") == [{"ticker": "AAPL", "name": "Apple Inc."}]
 
 
 def test_fixture_provider_news():
@@ -93,6 +99,23 @@ def test_search_assets_filters_tradable_active_equities_and_caches_result():
     request = trading.requests[0]
     assert request.status.value == "active"
     assert request.asset_class.value == "us_equity"
+
+
+def test_search_assets_prioritizes_symbol_matches_over_name_only_matches():
+    trading = FakeTradingClient(
+        [
+            FakeAsset("AAA", "Book Holdings"),
+            FakeAsset("ZZOO", "Zoologic Holdings"),
+        ]
+    )
+    provider = provider_with(trading=trading)
+
+    result = provider.search_assets("oo")
+
+    assert result == [
+        {"ticker": "ZZOO", "name": "Zoologic Holdings"},
+        {"ticker": "AAA", "name": "Book Holdings"},
+    ]
 
 
 def test_bars_builds_max_range_request_and_thins_ohlcv_results():

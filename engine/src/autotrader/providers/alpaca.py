@@ -56,7 +56,7 @@ class AlpacaProvider:
         ]
         matches.sort(
             key=lambda asset: (
-                not asset["ticker"].casefold().startswith(normalized_query),
+                normalized_query not in asset["ticker"].casefold(),
                 asset["ticker"],
             )
         )

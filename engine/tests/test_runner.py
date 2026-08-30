@@ -1,4 +1,5 @@
 from autotrader.runner import Runner
+from autotrader.history import HistoryRange
 from autotrader.models import Decision, AgentDecision, SignalSet, Signal, Equity, Position, Side
 from autotrader.providers.fixtures import FixtureProvider
 import pytest
@@ -92,10 +93,10 @@ def test_manage_exits_no_trigger_when_within_band():
 
 def test_runner_skips_bad_ticker_and_continues():
     class BadTickerProvider(FixtureProvider):
-        def bars(self, ticker, limit=50):
+        def bars(self, ticker, history_range=HistoryRange.ONE_DAY):
             if ticker == "BAD":
                 raise RuntimeError("no data")
-            return super().bars(ticker, limit)
+            return super().bars(ticker, history_range)
 
     ex = FakeExec()
     runner = Runner(provider=BadTickerProvider(), agent=BuyAgent(), executor=ex, risk=None, cfg=None)

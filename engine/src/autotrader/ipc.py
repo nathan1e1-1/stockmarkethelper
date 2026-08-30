@@ -3,6 +3,7 @@ from typing import Any
 
 from fastapi import FastAPI
 
+from autotrader.history import HistoryRange
 from autotrader.models import Equity
 
 
@@ -37,11 +38,14 @@ def create_app(state: SharedState, provider=None) -> FastAPI:
         return {"summary": state.summary}
 
     @app.get("/api/bars")
-    def bars(ticker: str = "", limit: int = 80) -> dict[str, Any]:
+    def bars(
+        ticker: str = "",
+        history_range: HistoryRange = HistoryRange.ONE_DAY,
+    ) -> dict[str, Any]:
         if not ticker or provider is None:
             return {"bars": []}
         try:
-            return {"bars": provider.bars(ticker.upper(), limit=limit)}
+            return {"bars": provider.bars(ticker.upper(), history_range=history_range)}
         except Exception:
             return {"bars": []}
 
