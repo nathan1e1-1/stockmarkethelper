@@ -22,8 +22,7 @@ struct ChartsView: View {
             }
         }
         .padding(24)
-        .frame(maxWidth: 920, alignment: .leading)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color.background)
         .task(id: query) { await load() }
     }
@@ -41,8 +40,7 @@ struct ChartsView: View {
                     .font(.callout)
                     .foregroundStyle(Color.mutedForeground)
             }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 60)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
@@ -56,8 +54,7 @@ struct ChartsView: View {
                         .font(.callout)
                         .foregroundStyle(Color.mutedForeground)
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 60)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         } else if bars.isEmpty {
             SCard {
@@ -72,8 +69,7 @@ struct ChartsView: View {
                         .font(.callout)
                         .foregroundStyle(Color.mutedForeground)
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 48)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         } else {
             candleChart
@@ -132,9 +128,10 @@ struct ChartsView: View {
                     }
                 }
                 .animation(.easeInOut(duration: 0.5), value: bars.count)
-                .frame(height: 340)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .padding(20)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
     }
 
