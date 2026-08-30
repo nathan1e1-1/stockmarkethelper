@@ -1,7 +1,7 @@
 from dataclasses import asdict
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 
 from autotrader.history import HistoryRange
 from autotrader.models import Equity
@@ -40,7 +40,7 @@ def create_app(state: SharedState, provider=None) -> FastAPI:
     @app.get("/api/bars")
     def bars(
         ticker: str = "",
-        history_range: HistoryRange = HistoryRange.ONE_DAY,
+        history_range: HistoryRange = Query(HistoryRange.ONE_DAY, alias="range"),
     ) -> dict[str, Any]:
         if not ticker or provider is None:
             return {"bars": []}

@@ -1,6 +1,8 @@
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
-from autotrader.history import HistoryRange, HistoryRequest
+from alpaca.data.timeframe import TimeFrameUnit
+
+from autotrader.history import HistoryRange, HistoryRequest, thin_bars
 
 
 class FixtureProvider:
@@ -39,11 +41,30 @@ class FixtureProvider:
     ) -> list[dict]:
         # Clean uptrend so momentum is strongly positive.
         request = HistoryRequest.for_range(history_range)
-        start = datetime(2026, 8, 25, tzinfo=timezone.utc)
-        return [
-            {"t": (start + timedelta(minutes=i)).isoformat(), "close": 100.0 + i}
-            for i in range(request.max_bars)
-        ]
+        interval = {
+            TimeFrameUnit.Minute: timedelta(minutes=request.timeframe.amount),
+            TimeFrameUnit.Hour: timedelta(hours=request.timeframe.amount),
+            TimeFrameUnit.Day: timedelta(days=request.timeframe.amount),
+        }[request.timeframe.unit]
+        periods = int((request.end - request.start) // interval)
+        timestamps = [request.start + interval * index for index in range(periods + 1)]
+        if timestamps[-1] < request.end:
+            timestamps.append(request.end)
+
+        bars = []
+        for index, timestamp in enumerate(timestamps):
+            close = 100.0 + index
+            bars.append(
+                {
+                    "t": timestamp.isoformat(),
+                    "open": close - 0.5,
+                    "high": close + 0.5,
+                    "low": close - 1.0,
+                    "close": close,
+                    "volume": float(1_000 + index),
+                }
+            )
+        return thin_bars(bars, request.max_bars)
 
     def news(self, ticker: str, limit: int = 5) -> list[dict]:
         return [

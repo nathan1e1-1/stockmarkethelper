@@ -60,6 +60,42 @@ def test_bars_endpoint_returns_bars():
     assert provider.calls == [("AAPL", HistoryRange.ONE_DAY)]
 
 
+def test_bars_endpoint_uses_public_range_query_parameter():
+    class FakeProvider:
+        def __init__(self):
+            self.calls = []
+
+        def bars(self, ticker, history_range=HistoryRange.ONE_DAY):
+            self.calls.append((ticker, history_range))
+            return []
+
+    provider = FakeProvider()
+    client = TestClient(create_app(SharedState(), provider=provider))
+
+    response = client.get("/api/bars", params={"ticker": "AAPL", "range": "1Y"})
+
+    assert response.status_code == 200
+    assert provider.calls == [("AAPL", HistoryRange.ONE_YEAR)]
+
+
+def test_bars_endpoint_rejects_invalid_public_range_without_calling_provider():
+    class FakeProvider:
+        def __init__(self):
+            self.calls = []
+
+        def bars(self, ticker, history_range=HistoryRange.ONE_DAY):
+            self.calls.append((ticker, history_range))
+            return []
+
+    provider = FakeProvider()
+    client = TestClient(create_app(SharedState(), provider=provider))
+
+    response = client.get("/api/bars", params={"ticker": "AAPL", "range": "all-time"})
+
+    assert response.status_code == 422
+    assert provider.calls == []
+
+
 def test_bars_endpoint_empty_without_ticker():
     state = SharedState()
     client = TestClient(create_app(state))

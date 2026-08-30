@@ -1,5 +1,5 @@
 from autotrader.providers.fixtures import FixtureProvider
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from alpaca.data.timeframe import TimeFrameUnit
 
@@ -23,6 +23,25 @@ def test_fixture_provider_search_assets_matches_ticker_or_name():
     p = FixtureProvider()
 
     assert p.search_assets("app") == [{"ticker": "AAPL", "name": "Apple Inc."}]
+
+
+def test_fixture_provider_one_year_bars_are_daily_full_ohlcv_and_cover_a_year():
+    bars = FixtureProvider().bars("AAPL", history_range=HistoryRange.ONE_YEAR)
+    timestamps = [datetime.fromisoformat(bar["t"]) for bar in bars]
+
+    assert set(bars[0]) == {"t", "open", "high", "low", "close", "volume"}
+    assert timestamps[-1] - timestamps[0] >= timedelta(days=365)
+    assert all(after - before == timedelta(days=1) for before, after in zip(timestamps, timestamps[1:]))
+
+
+def test_fixture_provider_max_bars_are_bounded_and_retain_full_available_history():
+    bars = FixtureProvider().bars("AAPL", history_range=HistoryRange.MAX)
+    timestamps = [datetime.fromisoformat(bar["t"]) for bar in bars]
+
+    assert len(bars) == 500
+    assert timestamps[0] == datetime(1970, 1, 1, tzinfo=timezone.utc)
+    assert timestamps[-1] - timestamps[0] >= timedelta(days=365 * 50)
+    assert timestamps == sorted(timestamps)
 
 
 def test_fixture_provider_news():
@@ -142,3 +161,15 @@ def test_bars_builds_max_range_request_and_thins_ohlcv_results():
         "volume": 100.0,
     }
     assert result[-1]["t"] == "2026-08-30T00:00:00+00:00"
+
+
+def test_bars_builds_one_year_daily_request():
+    data = FakeDataClient([])
+    provider = provider_with(data=data)
+
+    provider.bars("AAPL", HistoryRange.ONE_YEAR)
+
+    request = data.requests[0]
+    assert request.timeframe.amount == 1
+    assert request.timeframe.unit is TimeFrameUnit.Day
+    assert timedelta(days=365) <= request.end - request.start <= timedelta(days=367)
