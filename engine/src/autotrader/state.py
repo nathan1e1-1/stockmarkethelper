@@ -17,6 +17,9 @@ class State:
 
 def _decode_decision(d: dict) -> AgentDecision:
     decision = Decision(d["decision"]) if isinstance(d.get("decision"), str) else d["decision"]
+    timestamp = d.get("timestamp")
+    if isinstance(timestamp, str):
+        timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
     signals = None
     if isinstance(d.get("signals"), dict):
         ss = d["signals"]
@@ -26,12 +29,14 @@ def _decode_decision(d: dict) -> AgentDecision:
             composite=ss["composite"],
             regime=ss["regime"],
         )
+    kwargs = {"timestamp": timestamp} if timestamp is not None else {}
     return AgentDecision(
         ticker=d["ticker"],
         decision=decision,
         rationale=d.get("rationale", ""),
         confidence=d.get("confidence", 0.0),
         signals=signals,
+        **kwargs,
     )
 
 
