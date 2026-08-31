@@ -15,8 +15,16 @@ _SAFE_READ_ONLY_LIMITATION = (
     "promises, or risk-control bypass guidance."
 )
 _UNSAFE_ANSWER_PATTERNS = (
-    re.compile(r"\b(?:you\s+should|recommend|suggest|consider)\s+(?:to\s+)?(?:buy|sell)\b", re.IGNORECASE),
-    re.compile(r"\b(?:buy|sell)\s+(?:[A-Z]{1,5}|\d+(?:\.\d+)?\s+(?:shares?|units?))\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:you\s+should|(?:i\s+)?(?:advise|recommend|suggest)|consider)\s+"
+        r"(?:that\s+you\s+)?(?:to\s+)?(?:buy(?:ing)?|sell(?:ing)?)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?m)^\s*(?:please\s+)?(?:buy|sell)\s+"
+        r"(?:[A-Z]{1,5}|\d+(?:\.\d+)?\s+(?:shares?|units?))\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"\b(?:place|submit|enter)\s+(?:an?\s+)?order\b", re.IGNORECASE),
     re.compile(r"\border\s+\d+(?:\.\d+)?\s+(?:shares?|units?)\b", re.IGNORECASE),
     re.compile(r"\b(?:guarantee[sd]?|promise[sd]?|certain|sure)\b.{0,80}\b(?:profit|profits|return|returns|gain|gains)\b", re.IGNORECASE),
