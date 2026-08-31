@@ -189,6 +189,13 @@ def test_chat_endpoint_uses_read_only_factual_context_and_user_question():
     state.decisions = [AgentDecision(ticker="AAPL", decision=Decision.HOLD, rationale="mixed signals", confidence=0.4)]
     state.risk = FakeRisk()
     state.summary = "No completed trades yet."
+    state.pnl_attribution = {
+        "daily_pnl": -1_000.0,
+        "realized_pnl": -400.0,
+        "unrealized_pnl": -600.0,
+        "open_positions": [],
+        "realized_trades": [],
+    }
     llm = FakeLLM()
     client = TestClient(create_app(state, llm=llm))
 
@@ -208,6 +215,9 @@ def test_chat_endpoint_uses_read_only_factual_context_and_user_question():
     assert '"confidence": 0.4' in prompt
     assert "mixed signals" in prompt
     assert "No completed trades yet." in prompt
+    assert '"daily_pnl": -1000.0' in prompt
+    assert '"realized_pnl": -400.0' in prompt
+    assert '"unrealized_pnl": -600.0' in prompt
     assert "--- BEGIN UNTRUSTED USER QUESTION (JSON) ---" in prompt
     assert '"question": "What is the current account state?"' in prompt
     assert "--- END UNTRUSTED USER QUESTION (JSON) ---" in prompt
@@ -217,6 +227,9 @@ def test_chat_endpoint_uses_read_only_factual_context_and_user_question():
     assert "never disable or bypass risk" in prompt
     assert "do not recommend, suggest, or imply BUY, SELL, or order action" in prompt
     assert "say when data is missing" in prompt
+    assert "largest available realized and unrealized contributors" in prompt
+    assert "clearly distinguish realized from unrealized" in prompt
+    assert "do not infer an unavailable price" in prompt
 
 
 def test_chat_endpoint_marks_adversarial_question_as_untrusted_data():

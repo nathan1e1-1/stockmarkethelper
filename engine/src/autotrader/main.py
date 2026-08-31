@@ -11,12 +11,24 @@ from autotrader.execution import AlpacaExecutor
 from autotrader.ipc import SharedState, create_app
 from autotrader.market import EASTERN, is_after_close, is_market_open
 from autotrader.models import Equity
+from autotrader.pnl import build_pnl_snapshot
 from autotrader.providers.alpaca import AlpacaProvider
 from autotrader.risk import RiskManager
 from autotrader.runner import Runner
 from autotrader.state import State, StateStore, same_day
 from autotrader.summary import daily_summary
 from autotrader.universe import build_universe
+
+
+def publish_pnl_attribution(shared, provider, equity, positions, closed_trades) -> None:
+    prices = {}
+    for position in positions:
+        try:
+            prices[position.ticker] = provider.latest_price(position.ticker)
+        except Exception as error:
+            print(f"[warn] latest price unavailable for {position.ticker}: {error}")
+            prices[position.ticker] = None
+    shared.pnl_attribution = build_pnl_snapshot(equity, positions, prices, closed_trades)
 
 
 def main() -> None:
@@ -60,6 +72,7 @@ def main() -> None:
     shared.equity = runner.equity
     shared.positions = executor.positions()
     shared.risk = risk
+    publish_pnl_attribution(shared, provider, runner.equity, shared.positions, runner.closed_trades)
 
     flatten_time = datetime.strptime(cfg.flatten_time, "%H:%M").time() if cfg.flatten_at_close else None
     reconciled = False
@@ -82,6 +95,7 @@ def main() -> None:
         runner.run_once(universe)
         shared.equity = runner.equity
         shared.positions = executor.positions()
+        publish_pnl_attribution(shared, provider, runner.equity, shared.positions, runner.closed_trades)
         shared.decisions = runner.decisions
         shared.risk = risk
         shared.equity_history.append({"t": time.time(), "equity": equity})

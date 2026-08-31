@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 
 from autotrader.models import ClosedTrade, Equity, Position
 from autotrader.pnl import build_pnl_snapshot
+from autotrader.main import publish_pnl_attribution
 
 
 def test_pnl_snapshot_separates_daily_realized_and_unrealized_contributors():
@@ -37,6 +38,16 @@ def test_pnl_snapshot_separates_daily_realized_and_unrealized_contributors():
     assert snapshot["daily_pnl_pct"] == 5
     assert snapshot["unrealized_pnl"] == 20
     assert snapshot["realized_pnl"] == 10
+    assert snapshot["realized_trades"] == [
+        {
+            "ticker": "MSFT",
+            "qty": 1,
+            "entry_price": 90,
+            "exit_price": 100,
+            "realized_pnl": 10,
+            "exit_reason": "take profit",
+        }
+    ]
     assert snapshot["open_positions"] == [
         {
             "ticker": "AAPL",
@@ -93,3 +104,30 @@ def test_pnl_snapshot_sorts_available_positions_by_absolute_unrealized_pnl():
     )
 
     assert [position["ticker"] for position in snapshot["open_positions"]] == ["MSFT", "AAPL"]
+
+
+def test_publish_pnl_attribution_keeps_other_positions_when_a_price_lookup_fails():
+    class FakeProvider:
+        def latest_price(self, ticker):
+            if ticker == "MSFT":
+                raise RuntimeError("price unavailable")
+            return 110
+
+    class FakeSharedState:
+        pnl_attribution = None
+
+    shared = FakeSharedState()
+    publish_pnl_attribution(
+        shared=shared,
+        provider=FakeProvider(),
+        equity=Equity(equity=1000, day_start_equity=1000, peak_equity=1000, day="2026-08-31"),
+        positions=[
+            Position(ticker="AAPL", qty=2, avg_entry_price=100),
+            Position(ticker="MSFT", qty=1, avg_entry_price=200),
+        ],
+        closed_trades=[],
+    )
+
+    assert shared.pnl_attribution["unrealized_pnl"] == 20
+    assert shared.pnl_attribution["open_positions"][1]["ticker"] == "MSFT"
+    assert shared.pnl_attribution["open_positions"][1]["current_price"] is None

@@ -39,11 +39,20 @@ def build_pnl_snapshot(
         available_positions.append(record)
 
     available_positions.sort(key=lambda position: abs(position["unrealized_pnl"]), reverse=True)
-    realized_pnl = sum(
-        trade.realized_pnl
+    realized_trades = [
+        {
+            "ticker": trade.ticker,
+            "qty": trade.qty,
+            "entry_price": trade.entry_price,
+            "exit_price": trade.exit_price,
+            "realized_pnl": trade.realized_pnl,
+            "exit_reason": trade.exit_reason,
+        }
         for trade in closed_trades
         if _closed_on_day(trade.closed_at, equity.day)
-    )
+    ]
+    realized_trades.sort(key=lambda trade: abs(trade["realized_pnl"]), reverse=True)
+    realized_pnl = sum(trade["realized_pnl"] for trade in realized_trades)
     unrealized_pnl = sum(position["unrealized_pnl"] for position in available_positions)
     daily_pnl = equity.equity - equity.day_start_equity
 
@@ -55,6 +64,7 @@ def build_pnl_snapshot(
         "unrealized_pnl": unrealized_pnl,
         "realized_pnl": realized_pnl,
         "open_positions": available_positions + unavailable_positions,
+        "realized_trades": realized_trades,
     }
 
 
