@@ -13,6 +13,7 @@ class MarketDataProvider(Protocol):
         history_range: HistoryRange = HistoryRange.ONE_DAY,
         *,
         limit: int | None = None,
+        timeframe: str | None = None,
     ) -> list[dict]: ...
     def gainers(self, limit: int) -> list[dict]: ...
 

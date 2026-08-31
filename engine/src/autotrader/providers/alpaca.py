@@ -68,7 +68,10 @@ class AlpacaProvider:
         history_range: HistoryRange = HistoryRange.ONE_DAY,
         *,
         limit: int | None = None,
+        timeframe: str | None = None,
     ) -> list[dict]:
+        if timeframe is not None and timeframe != "1min":
+            raise ValueError(f"unsupported timeframe: {timeframe}")
         history = HistoryRequest.for_range(history_range)
         req = StockBarsRequest(
             symbol_or_symbols=[ticker],

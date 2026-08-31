@@ -40,8 +40,11 @@ class FixtureProvider:
         history_range: HistoryRange = HistoryRange.ONE_DAY,
         *,
         limit: int | None = None,
+        timeframe: str | None = None,
     ) -> list[dict]:
         # Clean uptrend so momentum is strongly positive.
+        if timeframe is not None and timeframe != "1min":
+            raise ValueError(f"unsupported timeframe: {timeframe}")
         request = HistoryRequest.for_range(history_range)
         interval = {
             TimeFrameUnit.Minute: timedelta(minutes=request.timeframe.amount),
