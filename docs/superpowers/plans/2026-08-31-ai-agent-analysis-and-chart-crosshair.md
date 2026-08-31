@@ -390,3 +390,127 @@ Expected: no whitespace errors, every done criterion is represented, and no scop
 - [ ] **Step 3: Obtain independent code review**
 
 Ask a review-only subagent to compare the diff with `docs/specs/ai-agent-analysis-and-chart-crosshair.md`, specifically checking response compatibility, unsafe-output handling, tooltip coordinate conversion, hover dismissal, and range-switch/reset behavior. Address only confirmed findings with tests before opening a PR.
+
+### Revision: Strict actionable-language output policy
+
+The approved policy replaces open-ended phrase-by-phrase exemptions. The chat
+context must identify each historical engine decision with a source and ISO
+timestamp. The output validator must process each response sentence: discard a
+sentence containing actionable language unless it names `engine decision log`,
+contains a date from the supplied decision records, uses historical attribution,
+and contains no prospective/actionable framing. If every sentence is discarded,
+return the existing safe limitation. This supports factual recorded decisions
+without accepting an invented or undated recommendation.
+
+### Task 6: Enforce the strict sentence-level output policy
+
+**Files:**
+- Modify: `engine/src/autotrader/ipc.py`
+- Modify: `engine/tests/test_ipc.py`
+
+- [ ] **Step 1: Write failing boundary tests**
+
+Add a state fixture with an `AgentDecision` timestamp of
+`2026-08-31T14:30:00+00:00`. Add a parameterized test proving that these LLM
+outputs return the safe limitation rather than pass through:
+
+```python
+[
+    "You should definitely buy AAPL now.",
+    "I recommend that you keep holding AAPL.",
+    "For your portfolio, AAPL is a buy.",
+    "My advice: sell AAPL now.",
+    "Go ahead and buy AAPL.",
+    "Trade through the daily stop.",
+    "Turn the daily stop off, then keep trading.",
+    "AAPL is a buy according to the recorded decision today.",
+]
+```
+
+Add a test proving that an answer with one factual P&L sentence followed by
+`"Go ahead and buy AAPL."` returns only the factual sentence. Add a permitted
+historical test for `"The engine decision log recorded BUY AAPL on 2026-08-31."`
+and rejection tests for the same wording without the date and without the
+source. Assert that `_chat_context` contains exactly
+`"source": "engine decision log"` and the decision's ISO `recorded_at` value.
+
+- [ ] **Step 2: Run the focused tests and verify the current implementation fails**
+
+Run: `PYTHONPATH=engine/src /Users/nthnp/Developer/stockmarkethelper/engine/.venv/bin/python -m pytest engine/tests/test_ipc.py -q`
+
+Expected: the new prospective/undated recommendation tests fail because the
+current phrase patterns are incomplete and chat context omits decision source
+and timestamp.
+
+- [ ] **Step 3: Add sourced decision context and deterministic sentence filtering**
+
+In `_chat_context`, serialize each decision as:
+
+```python
+{
+    "source": "engine decision log",
+    "recorded_at": decision.timestamp.isoformat(),
+    "ticker": decision.ticker,
+    "decision": decision.decision.value,
+    "confidence": decision.confidence,
+    "rationale": decision.rationale,
+}
+```
+
+Replace the short read-only prompt policy with the approved actionable-language
+clause, including the per-sentence self-check and the source/date/past-tense
+exception. Add a pure helper named `_filter_actionable_sentences(answer,
+allowed_decision_dates)` that splits on sentence boundaries, removes a sentence
+containing buy/sell/hold/order/risk-control action language unless it includes
+all of: `engine decision log`, an ISO date in `allowed_decision_dates`, and
+explicit historical attribution (`recorded`, `logged`, `executed`, or `filed`).
+It must also remove sentences with advice framing (`should`, `recommend`,
+`advice`, `go ahead`, `consider`, `worth`, `watch for`), prospective framing
+(`will`, `could`, `may`, `likely`, `entry`, `breakout`, `rally`), or a
+risk-control bypass phrase. Return the remaining stripped sentences joined by a
+single space. The chat endpoint returns the existing safe limitation when this
+result is empty; otherwise it returns the filtered answer plus the existing
+disclaimer.
+
+- [ ] **Step 4: Run focused and full engine verification**
+
+Run:
+
+```bash
+PYTHONPATH=engine/src /Users/nthnp/Developer/stockmarkethelper/engine/.venv/bin/python -m pytest engine/tests/test_ipc.py -q
+PYTHONPATH=engine/src /Users/nthnp/Developer/stockmarkethelper/engine/.venv/bin/python -m pytest engine/tests -q
+```
+
+Expected: all tests pass, including existing factual P&L responses and the
+new sentence-filter and sourced-date boundary tests.
+
+- [ ] **Step 5: Commit the policy implementation**
+
+```bash
+git add engine/src/autotrader/ipc.py engine/tests/test_ipc.py
+git commit -m "fix: enforce strict chat output policy"
+```
+
+### Task 7: Release review after policy hardening
+
+**Files:**
+- Verify only: all files changed from `origin/main`
+
+- [ ] **Step 1: Run release checks**
+
+Run:
+
+```bash
+PYTHONPATH=engine/src /Users/nthnp/Developer/stockmarkethelper/engine/.venv/bin/python -m pytest engine/tests -q
+bash app/build-app.sh
+git diff origin/main...HEAD --check
+```
+
+Expected: Python tests pass, the app builds, and no whitespace errors exist.
+
+- [ ] **Step 2: Obtain final independent review**
+
+Ask a fresh review-only subagent to evaluate the entire diff against the
+revised spec, testing adversarial advice phrasing and the strict historical
+exception. Do not proceed to integration with an open Critical or Important
+finding.
