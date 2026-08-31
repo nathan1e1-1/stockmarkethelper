@@ -376,6 +376,32 @@ def test_chat_endpoint_replaces_direct_hold_instruction_with_safe_limitation():
     }
 
 
+@pytest.mark.parametrize(
+    "unsafe_answer",
+    [
+        "Buying AAPL now is the right move.",
+        "AAPL is a buy.",
+        "Avoid selling AAPL today.",
+        "You can trade despite the daily stop.",
+        "Set the kill switch to false and continue.",
+    ],
+)
+def test_chat_endpoint_replaces_unambiguous_recommendations_and_risk_bypasses(unsafe_answer):
+    class UnsafeLLM:
+        def complete(self, prompt):
+            return unsafe_answer
+
+    client = TestClient(create_app(SharedState(), llm=UnsafeLLM()))
+
+    response = client.post("/api/chat", json={"question": "What should I do?"})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "answer": _SAFE_READ_ONLY_LIMITATION,
+        "disclaimer": _INFORMATIONAL_DISCLAIMER,
+    }
+
+
 def test_chat_endpoint_replaces_advisory_buying_recommendation_with_safe_limitation():
     class UnsafeLLM:
         def complete(self, prompt):

@@ -27,6 +27,26 @@ _UNSAFE_ANSWER_PATTERNS = (
         r"(?:[A-Z]{1,5}|\d+(?:\.\d+)?\s+(?:shares?|units?))\b",
         re.IGNORECASE,
     ),
+    re.compile(
+        r"(?m)^\s*(?:buy(?:ing)?|purchas(?:e|ing)|sell(?:ing)?|hold(?:ing)?)\s+[A-Z]{1,5}\b"
+        r".{0,80}\b(?:right move|right choice|good idea|best choice)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"(?m)^\s*[A-Z]{1,5}\s+is\s+(?:a\s+)?(?:buy|sell|hold)\b", re.IGNORECASE),
+    re.compile(
+        r"(?m)^\s*avoid\s+(?:buy(?:ing)?|purchas(?:e|ing)|sell(?:ing)?|hold(?:ing)?)\s+[A-Z]{1,5}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?m)^\s*you\s+can\s+trade\b.{0,80}\bdespite\b.{0,80}"
+        r"\b(?:risk|kill switch|daily stop|stop loss|controls?)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?m)^\s*set\s+(?:the\s+)?(?:kill switch|daily stop|stop loss|risk controls?)\s+"
+        r"to\s+(?:false|off|disabled|inactive)\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"\b(?:place|submit|enter)\s+(?:an?\s+)?order\b", re.IGNORECASE),
     re.compile(r"\border\s+\d+(?:\.\d+)?\s+(?:shares?|units?)\b", re.IGNORECASE),
     re.compile(r"\b(?:guarantee[sd]?|promise[sd]?|certain|sure)\b.{0,80}\b(?:profit|profits|return|returns|gain|gains)\b", re.IGNORECASE),
