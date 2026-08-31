@@ -1,9 +1,32 @@
+from datetime import datetime, timezone
+
 from fastapi.testclient import TestClient
 import pytest
 
 from autotrader.history import HistoryRange
-from autotrader.ipc import _INFORMATIONAL_DISCLAIMER, _SAFE_READ_ONLY_LIMITATION, create_app, SharedState
+from autotrader.ipc import (
+    _INFORMATIONAL_DISCLAIMER,
+    _SAFE_READ_ONLY_LIMITATION,
+    _chat_context,
+    create_app,
+    SharedState,
+)
 from autotrader.models import AgentDecision, Decision, Equity, Position
+
+
+@pytest.fixture
+def state_with_recorded_decision():
+    state = SharedState()
+    state.decisions = [
+        AgentDecision(
+            ticker="AAPL",
+            decision=Decision.BUY,
+            rationale="recorded signal",
+            confidence=0.4,
+            timestamp=datetime(2026, 8, 31, 14, 30, tzinfo=timezone.utc),
+        )
+    ]
+    return state
 
 
 def test_status_endpoint():
@@ -186,7 +209,16 @@ def test_chat_endpoint_uses_read_only_factual_context_and_user_question():
     state = SharedState()
     state.equity = Equity(equity=99_000.0, day_start_equity=100_000.0, peak_equity=101_000.0, day="2026-08-30")
     state.positions = [Position(ticker="AAPL", qty=3, avg_entry_price=190.0)]
-    state.decisions = [AgentDecision(ticker="AAPL", decision=Decision.HOLD, rationale="mixed signals", confidence=0.4)]
+    decision_timestamp = datetime(2026, 8, 31, 14, 30, tzinfo=timezone.utc)
+    state.decisions = [
+        AgentDecision(
+            ticker="AAPL",
+            decision=Decision.HOLD,
+            rationale="mixed signals",
+            confidence=0.4,
+            timestamp=decision_timestamp,
+        )
+    ]
     state.risk = FakeRisk()
     state.summary = "No completed trades yet."
     state.pnl_attribution = {
@@ -215,6 +247,8 @@ def test_chat_endpoint_uses_read_only_factual_context_and_user_question():
     assert '"kill_switch": true' in prompt
     assert '"daily_stop": false' in prompt
     assert '"decision": "hold"' in prompt
+    assert '"source": "engine decision log"' in prompt
+    assert f'"recorded_at": "{decision_timestamp.isoformat()}"' in prompt
     assert '"confidence": 0.4' in prompt
     assert "mixed signals" in prompt
     assert "No completed trades yet." in prompt
@@ -235,6 +269,8 @@ def test_chat_endpoint_uses_read_only_factual_context_and_user_question():
     assert "largest available realized and unrealized contributors" in prompt
     assert "clearly distinguish realized from unrealized" in prompt
     assert "do not infer an unavailable price" in prompt
+    assert "The server-side validator is the final enforcement." in prompt
+    assert "Before sending each sentence, check it independently" in prompt
 
 
 def test_chat_endpoint_marks_adversarial_question_as_untrusted_data():
@@ -328,12 +364,29 @@ def test_chat_endpoint_returns_safe_retry_error_for_ollama_unavailable_sentinel(
     assert response.json()["detail"] == "Assistant is temporarily unavailable. Please try again shortly."
 
 
-def test_chat_endpoint_replaces_direct_buy_recommendation_with_safe_limitation():
+@pytest.mark.parametrize(
+    "unsafe_answer",
+    [
+        "You should definitely buy AAPL now.",
+        "I recommend that you keep holding AAPL.",
+        "For your portfolio, AAPL is a buy.",
+        "My advice: sell AAPL now.",
+        "Go ahead and buy AAPL.",
+        "Trade through the daily stop.",
+        "Turn the daily stop off, then keep trading.",
+        "AAPL is a buy according to the recorded decision today.",
+        "Go long AAPL.",
+        "Proceed without risk controls.",
+    ],
+)
+def test_chat_endpoint_replaces_strict_policy_violations_with_safe_limitation(
+    state_with_recorded_decision, unsafe_answer
+):
     class UnsafeLLM:
         def complete(self, prompt):
-            return "You should buy AAPL now."
+            return unsafe_answer
 
-    client = TestClient(create_app(SharedState(), llm=UnsafeLLM()))
+    client = TestClient(create_app(state_with_recorded_decision, llm=UnsafeLLM()))
 
     response = client.post("/api/chat", json={"question": "What should I do?"})
 
@@ -342,6 +395,81 @@ def test_chat_endpoint_replaces_direct_buy_recommendation_with_safe_limitation()
         "answer": _SAFE_READ_ONLY_LIMITATION,
         "disclaimer": _INFORMATIONAL_DISCLAIMER,
     }
+
+
+def test_chat_endpoint_removes_only_unsafe_sentences_from_mixed_response(state_with_recorded_decision):
+    class MixedLLM:
+        def complete(self, prompt):
+            return "P&L fell by $120 because of the recorded open-position prices. Go ahead and buy AAPL."
+
+    client = TestClient(create_app(state_with_recorded_decision, llm=MixedLLM()))
+
+    response = client.post("/api/chat", json={"question": "What explains the loss?"})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "answer": "P&L fell by $120 because of the recorded open-position prices.",
+        "disclaimer": _INFORMATIONAL_DISCLAIMER,
+    }
+
+
+def test_chat_endpoint_preserves_sourced_dated_historical_decision(state_with_recorded_decision):
+    class HistoricalLLM:
+        def complete(self, prompt):
+            return "The engine decision log recorded BUY AAPL on 2026-08-31."
+
+    client = TestClient(create_app(state_with_recorded_decision, llm=HistoricalLLM()))
+
+    response = client.post("/api/chat", json={"question": "What did the engine record?"})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "answer": "The engine decision log recorded BUY AAPL on 2026-08-31.",
+        "disclaimer": _INFORMATIONAL_DISCLAIMER,
+    }
+
+
+@pytest.mark.parametrize(
+    "unsafe_answer",
+    [
+        "The engine decision log recorded BUY AAPL.",
+        "The recorded BUY AAPL on 2026-08-31.",
+        "The engine decision log recorded BUY AAPL on 2026-08-31; follow that trade.",
+    ],
+)
+def test_chat_endpoint_rejects_historical_decisions_missing_required_attribution(
+    state_with_recorded_decision, unsafe_answer
+):
+    class UnsafeLLM:
+        def complete(self, prompt):
+            return unsafe_answer
+
+    client = TestClient(create_app(state_with_recorded_decision, llm=UnsafeLLM()))
+
+    response = client.post("/api/chat", json={"question": "What did the engine record?"})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "answer": _SAFE_READ_ONLY_LIMITATION,
+        "disclaimer": _INFORMATIONAL_DISCLAIMER,
+    }
+
+
+def test_chat_context_identifies_recorded_decision_source_and_timestamp(state_with_recorded_decision):
+    decision = state_with_recorded_decision.decisions[0]
+
+    context = _chat_context(state_with_recorded_decision)
+
+    assert context["decisions"] == [
+        {
+            "source": "engine decision log",
+            "recorded_at": decision.timestamp.isoformat(),
+            "ticker": "AAPL",
+            "decision": "buy",
+            "confidence": 0.4,
+            "rationale": "recorded signal",
+        }
+    ]
 
 
 def test_chat_endpoint_replaces_personalized_hold_instruction_with_safe_limitation():
@@ -384,6 +512,7 @@ def test_chat_endpoint_replaces_direct_hold_instruction_with_safe_limitation():
         "Avoid selling AAPL today.",
         "You can trade despite the daily stop.",
         "Set the kill switch to false and continue.",
+        "Turn the daily stop off.",
     ],
 )
 def test_chat_endpoint_replaces_unambiguous_recommendations_and_risk_bypasses(unsafe_answer):
@@ -442,54 +571,6 @@ def test_chat_endpoint_replaces_purchase_recommendation_with_safe_limitation():
     assert response.status_code == 200
     assert "cannot offer trading recommendations, promises, or risk-control bypass guidance" in response.json()["answer"]
     assert response.json()["disclaimer"] == _INFORMATIONAL_DISCLAIMER
-
-
-def test_chat_endpoint_preserves_factual_recorded_buy_decision():
-    class FactualLLM:
-        def complete(self, prompt):
-            return "The current recorded decision is BUY AAPL with 0.4 confidence."
-
-    client = TestClient(create_app(SharedState(), llm=FactualLLM()))
-
-    response = client.post("/api/chat", json={"question": "What was the decision?"})
-
-    assert response.status_code == 200
-    assert response.json() == {
-        "answer": "The current recorded decision is BUY AAPL with 0.4 confidence.",
-        "disclaimer": _INFORMATIONAL_DISCLAIMER,
-    }
-
-
-def test_chat_endpoint_preserves_factual_recorded_hold_decision():
-    class FactualLLM:
-        def complete(self, prompt):
-            return "The recorded decision is HOLD."
-
-    client = TestClient(create_app(SharedState(), llm=FactualLLM()))
-
-    response = client.post("/api/chat", json={"question": "What was the decision?"})
-
-    assert response.status_code == 200
-    assert response.json() == {
-        "answer": "The recorded decision is HOLD.",
-        "disclaimer": _INFORMATIONAL_DISCLAIMER,
-    }
-
-
-def test_chat_endpoint_preserves_factual_recorded_ticker_rating():
-    class FactualLLM:
-        def complete(self, prompt):
-            return "AAPL is a buy according to the recorded decision at 09:30."
-
-    client = TestClient(create_app(SharedState(), llm=FactualLLM()))
-
-    response = client.post("/api/chat", json={"question": "What was the decision?"})
-
-    assert response.status_code == 200
-    assert response.json() == {
-        "answer": "AAPL is a buy according to the recorded decision at 09:30.",
-        "disclaimer": _INFORMATIONAL_DISCLAIMER,
-    }
 
 
 def test_chat_endpoint_replaces_direct_order_recommendation_with_safe_limitation():

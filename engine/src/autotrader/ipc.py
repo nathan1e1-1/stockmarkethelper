@@ -15,48 +15,43 @@ _SAFE_READ_ONLY_LIMITATION = (
     "I can provide factual, read-only context but cannot offer trading recommendations, "
     "promises, or risk-control bypass guidance."
 )
-_UNSAFE_ANSWER_PATTERNS = (
-    re.compile(
-        r"\b(?:you\s+should|(?:(?:i|we)\s+)?(?:advise(?:s|d|ing)?|recommend(?:s|ed|ing)?|"
-        r"suggest(?:s|ed|ing)?)|consider(?:s|ed|ing)?)\s+"
-        r"(?:(?:that\s+)?you\s+)?(?:to\s+)?(?:buy(?:ing)?|purchas(?:e|ing)|sell(?:ing)?|liquidat(?:e|ing)|hold(?:ing)?)\b",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"(?m)^\s*(?:please\s+)?(?:buy|purchase|sell|hold)\s+"
-        r"(?:[A-Z]{1,5}|\d+(?:\.\d+)?\s+(?:shares?|units?))\b",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"(?m)^\s*(?:buy(?:ing)?|purchas(?:e|ing)|sell(?:ing)?|hold(?:ing)?)\s+[A-Z]{1,5}\b"
-        r".{0,80}\b(?:right move|right choice|good idea|best choice)\b",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"(?m)^\s*[A-Z]{1,5}\s+is\s+(?:a\s+)?(?:buy|sell|hold)\b"
-        r"(?!\s+according\s+to\s+(?:the\s+)?(?:recorded|agent)\s+decision\b)",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"(?m)^\s*avoid\s+(?:buy(?:ing)?|purchas(?:e|ing)|sell(?:ing)?|hold(?:ing)?)\s+[A-Z]{1,5}\b",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"(?m)^\s*you\s+can\s+trade\b.{0,80}\bdespite\b.{0,80}"
-        r"\b(?:risk|kill switch|daily stop|stop loss|controls?)\b",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"(?m)^\s*set\s+(?:the\s+)?(?:kill switch|daily stop|stop loss|risk controls?)\s+"
-        r"to\s+(?:false|off|disabled|inactive)\b",
-        re.IGNORECASE,
-    ),
-    re.compile(r"\b(?:place|submit|enter)\s+(?:an?\s+)?order\b", re.IGNORECASE),
-    re.compile(r"\border\s+\d+(?:\.\d+)?\s+(?:shares?|units?)\b", re.IGNORECASE),
-    re.compile(r"\b(?:guarantee[sd]?|promise[sd]?|certain|sure)\b.{0,80}\b(?:profit|profits|return|returns|gain|gains)\b", re.IGNORECASE),
-    re.compile(r"\b(?:profit|profits|return|returns|gain|gains)\b.{0,80}\b(?:guaranteed|promised|certain|sure)\b", re.IGNORECASE),
-    re.compile(r"\b(?:disable|bypass|ignore|override|turn off)\b.{0,80}\b(?:risk|kill switch|daily stop|stop loss|controls?)\b", re.IGNORECASE),
+_ACTION_LANGUAGE = re.compile(
+    r"\b(?:buy|buying|bought|sell|selling|sold|hold|holding|held|trade|trading|traded|"
+    r"order|orders|ordered|ordering|purchase|purchases|purchased|purchasing|liquidate|"
+    r"liquidates|liquidated|liquidating|enter|enters|entered|entering|exit|exits|exited|exiting|"
+    r"(?:go|stay|get)\s+(?:long|short))\b",
+    re.IGNORECASE,
 )
+_ADVICE_FRAMING = re.compile(
+    r"\b(?:should|recommend(?:s|ed|ing)?|advice|advise(?:s|d|ing)?|suggest(?:s|ed|ing)?|"
+    r"go\s+ahead|consider(?:s|ed|ing)?|follow(?:\s+(?:that|this|the))?|worth|watch\s+for|"
+    r"for\s+your\s+portfolio|"
+    r"right\s+(?:move|choice)|good\s+idea|best\s+choice)\b",
+    re.IGNORECASE,
+)
+_PROSPECTIVE_FRAMING = re.compile(
+    r"\b(?:will|could|may|might|likely|entry|breakout|rally|forecast|predict(?:s|ed|ing)?)\b",
+    re.IGNORECASE,
+)
+_RISK_CONTROL_BYPASS = re.compile(
+    r"(?:\b(?:disable|bypass|ignore|override|turn\s+(?:off|on)|trade\s+through|"
+    r"keep\s+trading|continue\s+trading)\b.{0,80}\b(?:risk|kill\s+switch|daily\s+stop|"
+    r"stop\s+loss|controls?)\b|\b(?:risk|kill\s+switch|daily\s+stop|stop\s+loss|"
+    r"controls?)\b.{0,80}\b(?:disable|bypass|ignore|override|turn\s+(?:off|on))|"
+    r"\bset\s+(?:the\s+)?(?:risk|kill\s+switch|daily\s+stop|stop\s+loss|"
+    r"risk\s+controls?)\s+to\s+(?:false|off|disabled|inactive)\b|\bturn\b.{0,80}"
+    r"\b(?:risk|kill\s+switch|daily\s+stop|stop\s+loss|controls?)\b.{0,80}\b(?:off|on)\b|"
+    r"\b(?:proceed|continue|trade)\s+without\s+(?:risk|risk\s+controls?|kill\s+switch|"
+    r"daily\s+stop|stop\s+loss)\b)",
+    re.IGNORECASE,
+)
+_PROMISE_FRAMING = re.compile(
+    r"\b(?:guarantee[sd]?|promise[sd]?|certain|sure)\b.{0,80}\b(?:profit|profits|"
+    r"return|returns|gain|gains)\b|\b(?:profit|profits|return|returns|gain|gains)\b"
+    r".{0,80}\b(?:guaranteed|promised|certain|sure)\b",
+    re.IGNORECASE,
+)
+_HISTORICAL_ATTRIBUTION = re.compile(r"\b(?:recorded|logged|executed|filed)\b", re.IGNORECASE)
 
 
 class SharedState:
@@ -96,6 +91,8 @@ def _chat_context(state: SharedState) -> dict[str, Any]:
     ]
     decisions = [
         {
+            "source": "engine decision log",
+            "recorded_at": decision.timestamp.isoformat(),
             "ticker": decision.ticker,
             "decision": decision.decision.value,
             "confidence": decision.confidence,
@@ -114,8 +111,33 @@ def _chat_context(state: SharedState) -> dict[str, Any]:
     }
 
 
-def _is_unsafe_answer(answer: str) -> bool:
-    return any(pattern.search(answer) for pattern in _UNSAFE_ANSWER_PATTERNS)
+def _is_historical_record(sentence: str, allowed_decision_dates: set[str]) -> bool:
+    if "engine decision log" not in sentence.casefold() or not _HISTORICAL_ATTRIBUTION.search(sentence):
+        return False
+    return any(
+        re.search(rf"(?<![\d-]){re.escape(decision_date)}(?![\d-])", sentence) is not None
+        for decision_date in allowed_decision_dates
+    )
+
+
+def _filter_actionable_sentences(answer: str, allowed_decision_dates: set[str]) -> str:
+    sentences = re.split(r"(?<=[.!?])(?=\s|$)|\n+", answer.strip())
+    factual_sentences = []
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        if (
+            _ADVICE_FRAMING.search(sentence)
+            or _PROSPECTIVE_FRAMING.search(sentence)
+            or _RISK_CONTROL_BYPASS.search(sentence)
+            or _PROMISE_FRAMING.search(sentence)
+        ):
+            continue
+        if _ACTION_LANGUAGE.search(sentence) and not _is_historical_record(sentence, allowed_decision_dates):
+            continue
+        factual_sentences.append(sentence)
+    return " ".join(factual_sentences)
 
 
 def create_app(state: SharedState, provider=None, llm=None) -> FastAPI:
@@ -179,8 +201,17 @@ def create_app(state: SharedState, provider=None, llm=None) -> FastAPI:
             "trends, contributors, uncertainty, and non-prescriptive risk context. This is an "
             "informational/read-only assistant: no orders, no promised returns, never disable "
             "or bypass risk controls. Do not give personalized buy, sell, or hold instructions; "
-            "do not recommend, suggest, or imply BUY, SELL, or order action, and say when data "
-            "is missing. When P&L is requested, "
+            "do not recommend, suggest, or imply BUY, SELL, or order action. Output policy: "
+            "factual commentary only. Do not provide any buy, sell, hold, order, or trade "
+            "instruction or recommendation in any framing; do not give prospective risk-control "
+            "instruction or predictive framing that implies action, including soft-hedged advice. "
+            "The sole exception is a strictly historical action or risk measure explicitly "
+            "attributed to the named source engine decision log, dated with an ISO calendar date "
+            "supplied in the context, and described using past-tense attribution such as recorded, "
+            "logged, executed, or filed; it must not generalize forward. Perform a tense check. "
+            "Before sending each sentence, check it independently: if it violates this policy or "
+            "you are uncertain, remove the sentence rather than soften it. The server-side validator "
+            "is the final enforcement. You must say when data is missing. When P&L is requested, "
             "report the daily total and identify the largest available realized and unrealized "
             "contributors and clearly distinguish realized from unrealized results, label unknown "
             "data, and do not infer an unavailable price.\n\n"
@@ -195,7 +226,9 @@ def create_app(state: SharedState, provider=None, llm=None) -> FastAPI:
             answer = str(llm.complete(prompt))
             if answer.strip() == _UNAVAILABLE_LLM_RESPONSE:
                 raise RuntimeError("llm unavailable")
-            if _is_unsafe_answer(answer):
+            allowed_decision_dates = {decision.timestamp.date().isoformat() for decision in state.decisions}
+            answer = _filter_actionable_sentences(answer, allowed_decision_dates)
+            if not answer:
                 return {"answer": _SAFE_READ_ONLY_LIMITATION, "disclaimer": _INFORMATIONAL_DISCLAIMER}
             return {"answer": answer, "disclaimer": _INFORMATIONAL_DISCLAIMER}
         except Exception as error:
