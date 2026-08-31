@@ -1,5 +1,4 @@
 from autotrader.runner import Runner
-from autotrader.history import HistoryRange
 from autotrader.models import Decision, AgentDecision, SignalSet, Signal, Equity, Position, Side
 from autotrader.providers.fixtures import FixtureProvider
 import pytest
@@ -41,14 +40,17 @@ def test_runner_records_decisions():
     assert len(runner.decisions) == 1
 
 
-def test_runner_requests_the_fixed_50_one_minute_strategy_bars_not_chart_defaults():
+def test_runner_requests_scan_bars_instead_of_chart_history():
     class ChartRangeProvider(FixtureProvider):
         def __init__(self):
             self.calls = []
 
-        def bars(self, ticker, history_range=HistoryRange.ONE_DAY, *, limit=None, timeframe=None):
-            self.calls.append((ticker, history_range, limit, timeframe))
-            return super().bars(ticker, history_range, limit=limit, timeframe=timeframe)
+        def bars(self, ticker, history_range):
+            raise AssertionError("runner must not use chart history for a strategy scan")
+
+        def scan_bars(self, ticker):
+            self.calls.append(ticker)
+            return super().scan_bars(ticker)
 
     provider = ChartRangeProvider()
     runner = Runner(provider=provider, agent=BuyAgent(), executor=FakeExec(), risk=None, cfg=None)
@@ -56,7 +58,7 @@ def test_runner_requests_the_fixed_50_one_minute_strategy_bars_not_chart_default
 
     runner.run_once(universe=["AAPL"])
 
-    assert provider.calls == [("AAPL", HistoryRange.ONE_DAY, 50, "1min")]
+    assert provider.calls == ["AAPL"]
 
 
 class PriceProvider:
@@ -111,10 +113,10 @@ def test_manage_exits_no_trigger_when_within_band():
 
 def test_runner_skips_bad_ticker_and_continues():
     class BadTickerProvider(FixtureProvider):
-        def bars(self, ticker, history_range=HistoryRange.ONE_DAY, *, limit=None, timeframe=None):
+        def scan_bars(self, ticker):
             if ticker == "BAD":
                 raise RuntimeError("no data")
-            return super().bars(ticker, history_range, limit=limit, timeframe=timeframe)
+            return super().scan_bars(ticker)
 
     ex = FakeExec()
     runner = Runner(provider=BadTickerProvider(), agent=BuyAgent(), executor=ex, risk=None, cfg=None)

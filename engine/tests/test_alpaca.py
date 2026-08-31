@@ -19,6 +19,14 @@ def test_fixture_provider_bars_length():
     assert all(b["close"] > 0 for b in bars)
 
 
+def test_fixture_provider_scan_bars_are_fixed_to_fifty_one_minute_bars():
+    bars = FixtureProvider().scan_bars("AAPL")
+    timestamps = [datetime.fromisoformat(bar["t"]) for bar in bars]
+
+    assert len(bars) == 50
+    assert all(after - before == timedelta(minutes=1) for before, after in zip(timestamps, timestamps[1:]))
+
+
 def test_fixture_provider_search_assets_matches_ticker_or_name():
     p = FixtureProvider()
 
@@ -173,3 +181,16 @@ def test_bars_builds_one_year_daily_request():
     assert request.timeframe.amount == 1
     assert request.timeframe.unit is TimeFrameUnit.Day
     assert timedelta(days=365) <= request.end - request.start <= timedelta(days=367)
+
+
+def test_scan_bars_builds_the_legacy_seven_day_one_minute_fifty_bar_request():
+    data = FakeDataClient([])
+    provider = provider_with(data=data)
+
+    provider.scan_bars("AAPL")
+
+    request = data.requests[0]
+    assert request.timeframe.amount == 1
+    assert request.timeframe.unit is TimeFrameUnit.Minute
+    assert request.limit == 50
+    assert timedelta(days=7) <= request.end - request.start <= timedelta(days=7, seconds=1)

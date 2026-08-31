@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from alpaca.data.timeframe import TimeFrameUnit
 
@@ -38,13 +38,8 @@ class FixtureProvider:
         self,
         ticker: str,
         history_range: HistoryRange = HistoryRange.ONE_DAY,
-        *,
-        limit: int | None = None,
-        timeframe: str | None = None,
     ) -> list[dict]:
         # Clean uptrend so momentum is strongly positive.
-        if timeframe is not None and timeframe != "1min":
-            raise ValueError(f"unsupported timeframe: {timeframe}")
         request = HistoryRequest.for_range(history_range)
         interval = {
             TimeFrameUnit.Minute: timedelta(minutes=request.timeframe.amount),
@@ -69,7 +64,21 @@ class FixtureProvider:
                     "volume": float(1_000 + index),
                 }
             )
-        return thin_bars(bars, limit if limit is not None else request.max_bars)
+        return thin_bars(bars, request.max_bars)
+
+    def scan_bars(self, ticker: str) -> list[dict]:
+        start = datetime(2026, 8, 25, tzinfo=timezone.utc)
+        return [
+            {
+                "t": (start + timedelta(minutes=index)).isoformat(),
+                "open": 99.5 + index,
+                "high": 100.5 + index,
+                "low": 99.0 + index,
+                "close": 100.0 + index,
+                "volume": float(1_000 + index),
+            }
+            for index in range(50)
+        ]
 
     def news(self, ticker: str, limit: int = 5) -> list[dict]:
         return [

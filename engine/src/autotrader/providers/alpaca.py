@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 from alpaca.data import (
     DataFeed,
     MostActivesBy,
@@ -12,6 +14,7 @@ from alpaca.data import (
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import AssetClass, AssetStatus
 from alpaca.trading.requests import GetAssetsRequest
+from alpaca.data.timeframe import TimeFrame
 
 from autotrader.config import Config
 from autotrader.history import HistoryRange, HistoryRequest, thin_bars
@@ -66,19 +69,13 @@ class AlpacaProvider:
         self,
         ticker: str,
         history_range: HistoryRange = HistoryRange.ONE_DAY,
-        *,
-        limit: int | None = None,
-        timeframe: str | None = None,
     ) -> list[dict]:
-        if timeframe is not None and timeframe != "1min":
-            raise ValueError(f"unsupported timeframe: {timeframe}")
         history = HistoryRequest.for_range(history_range)
         req = StockBarsRequest(
             symbol_or_symbols=[ticker],
             timeframe=history.timeframe,
             start=history.start,
             end=history.end,
-            limit=limit,
             feed=DataFeed.IEX,
         )
         bars = self._data.get_stock_bars(req)[ticker]
@@ -93,7 +90,30 @@ class AlpacaProvider:
             }
             for b in bars
         ]
-        return thin_bars(normalized_bars, limit if limit is not None else history.max_bars)
+        return thin_bars(normalized_bars, history.max_bars)
+
+    def scan_bars(self, ticker: str) -> list[dict]:
+        end = datetime.now(timezone.utc)
+        req = StockBarsRequest(
+            symbol_or_symbols=[ticker],
+            timeframe=TimeFrame.Minute,
+            start=end - timedelta(days=7),
+            end=end,
+            limit=50,
+            feed=DataFeed.IEX,
+        )
+        bars = self._data.get_stock_bars(req)[ticker]
+        return [
+            {
+                "t": bar.timestamp.isoformat(),
+                "open": float(bar.open),
+                "high": float(bar.high),
+                "low": float(bar.low),
+                "close": float(bar.close),
+                "volume": float(bar.volume),
+            }
+            for bar in bars
+        ]
 
     def news(self, ticker: str, limit: int = 5) -> list[dict]:
         req = NewsRequest(symbols=ticker, limit=limit)
