@@ -38,6 +38,22 @@ explanation merely because it discusses P&L, positions, market movement, or
 uncertainty. The API returns the disclosure alongside each response; the app
 renders it consistently beneath the answer.
 
+### Actionable-language output policy
+
+The assistant produces factual market commentary only. It must not produce
+actionable guidance, including buy, sell, or hold recommendations in any
+framing; prospective risk-control instructions such as stops, sizing, hedging,
+targets, or rebalancing; predictive framing that implies an action; or
+soft-hedged recommendations.
+
+The sole exception is a strictly historical action or risk-control measure that
+is explicitly attributed to a named, dated, recorded decision in the supplied
+context. That statement must name its source and date, use past tense, and may
+not generalize into forward-looking guidance. The generation prompt requires a
+per-sentence self-check; the server-side response validator is the final
+enforcement point. If a sentence could reasonably be read as advice, it is
+removed rather than softened.
+
 ### Chart interaction
 
 The selected interaction is a pointer-following vertical crosshair (Option A).
@@ -56,6 +72,8 @@ fetching, selected range, panning, or zooming behavior.
   invoke order placement or alter engine risk controls.
 - Do not present personalized investment advice or imply a specific trading
   action.
+- Admit a buy/sell/hold or risk-control action only when it is a dated,
+  source-attributed historical fact found in the supplied data.
 - Use only data already provided by the application/API; no new paid or
   external market-data dependency is introduced.
 - Preserve existing chart range, zoom, and accessibility behavior.
