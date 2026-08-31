@@ -6,27 +6,44 @@ struct DashboardView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                statusLine.entrance()
-
-                if let eq = client.status?.equity {
-                    equityHeader(eq).entrance(delay: 0.05)
-                    stats(eq).entrance(delay: 0.1)
-                    pnlChart(eq).entrance(delay: 0.15)
-                } else {
-                    waitingCard.entrance(delay: 0.05)
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 24) {
+                    dashboardContent
+                        .frame(minWidth: 700, maxWidth: 920, alignment: .leading)
+                    AITradeDeskView()
+                        .frame(width: 340)
                 }
 
-                alerts.entrance(delay: 0.2)
+                VStack(alignment: .leading, spacing: 24) {
+                    dashboardContent
+                    AITradeDeskView()
+                        .frame(maxWidth: 540, alignment: .leading)
+                }
             }
             .padding(24)
-            .frame(maxWidth: 920, alignment: .leading)
+            .frame(maxWidth: 1_300, alignment: .leading)
             .frame(maxWidth: .infinity)
         }
         .background(Color.background)
         .task {
             client.start()
             await client.refresh()
+        }
+    }
+
+    private var dashboardContent: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            statusLine.entrance()
+
+            if let eq = client.status?.equity {
+                equityHeader(eq).entrance(delay: 0.05)
+                stats(eq).entrance(delay: 0.1)
+                pnlChart(eq).entrance(delay: 0.15)
+            } else {
+                waitingCard.entrance(delay: 0.05)
+            }
+
+            alerts.entrance(delay: 0.2)
         }
     }
 
