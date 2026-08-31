@@ -31,6 +31,16 @@ def publish_pnl_attribution(shared, provider, equity, positions, closed_trades) 
     shared.pnl_attribution = build_pnl_snapshot(equity, positions, prices, closed_trades)
 
 
+def restore_same_day_state(loaded: State, day: str, runner, risk) -> bool:
+    if not same_day(loaded, day):
+        return False
+    runner.decisions = loaded.decisions
+    runner.closed_trades = loaded.closed_trades
+    risk.day_start_equity = loaded.equity.day_start_equity
+    risk.peak_equity = max(loaded.equity.peak_equity, risk.peak_equity)
+    return True
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="config/config.yaml")
@@ -62,12 +72,19 @@ def main() -> None:
     risk.day_start_equity = equity
     risk.peak_equity = equity
 
+    startup_day = datetime.now(EASTERN).strftime("%Y-%m-%d")
+    loaded = store.load()
+    current_day = None
+    if restore_same_day_state(loaded, startup_day, runner, risk):
+        current_day = startup_day
+        print(f"[reload] restored {len(runner.decisions)} decisions, {len(runner.closed_trades)} closed trades")
+
     # Publish initial state so the UI shows account data immediately, even outside market hours.
     runner.equity = Equity(
         equity=equity,
-        day_start_equity=equity,
-        peak_equity=equity,
-        day=datetime.now(EASTERN).strftime("%Y-%m-%d"),
+        day_start_equity=risk.day_start_equity,
+        peak_equity=risk.peak_equity,
+        day=startup_day,
     )
     shared.equity = runner.equity
     shared.positions = executor.positions()
@@ -121,18 +138,7 @@ def main() -> None:
         generate_summary()
         return
 
-    current_day = None
     summary_done = False
-
-    startup_day = datetime.now(EASTERN).strftime("%Y-%m-%d")
-    loaded = store.load()
-    if same_day(loaded, startup_day):
-        runner.decisions = loaded.decisions
-        runner.closed_trades = loaded.closed_trades
-        risk.day_start_equity = loaded.equity.day_start_equity
-        risk.peak_equity = max(loaded.equity.peak_equity, risk.peak_equity)
-        current_day = startup_day
-        print(f"[reload] restored {len(runner.decisions)} decisions, {len(runner.closed_trades)} closed trades")
 
     while True:
         now = datetime.now(EASTERN)

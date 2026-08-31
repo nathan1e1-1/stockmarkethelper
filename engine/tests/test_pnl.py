@@ -2,7 +2,8 @@ from datetime import datetime, timezone
 
 from autotrader.models import ClosedTrade, Equity, Position
 from autotrader.pnl import build_pnl_snapshot
-from autotrader.main import publish_pnl_attribution
+from autotrader.main import publish_pnl_attribution, restore_same_day_state
+from autotrader.state import State
 
 
 def test_pnl_snapshot_separates_daily_realized_and_unrealized_contributors():
@@ -131,3 +132,50 @@ def test_publish_pnl_attribution_keeps_other_positions_when_a_price_lookup_fails
     assert shared.pnl_attribution["unrealized_pnl"] == 20
     assert shared.pnl_attribution["open_positions"][1]["ticker"] == "MSFT"
     assert shared.pnl_attribution["open_positions"][1]["current_price"] is None
+
+
+def test_same_day_restart_restores_closed_trades_before_publishing_pnl_attribution():
+    class FakeProvider:
+        def latest_price(self, ticker):
+            return 110
+
+    class FakeRunner:
+        decisions = []
+        closed_trades = []
+
+    class FakeRisk:
+        day_start_equity = 1_050
+        peak_equity = 1_050
+
+    class FakeSharedState:
+        pnl_attribution = None
+
+    restored_state = State(
+        equity=Equity(equity=1_040, day_start_equity=1_000, peak_equity=1_060, day="2026-08-31"),
+        closed_trades=[
+            ClosedTrade(
+                ticker="MSFT",
+                qty=1,
+                entry_price=90,
+                exit_price=100,
+                realized_pnl=10,
+                exit_reason="take profit",
+                closed_at=datetime(2026, 8, 31, 15, tzinfo=timezone.utc),
+            )
+        ],
+    )
+    runner = FakeRunner()
+    risk = FakeRisk()
+    shared = FakeSharedState()
+
+    assert restore_same_day_state(restored_state, "2026-08-31", runner, risk) is True
+    publish_pnl_attribution(
+        shared=shared,
+        provider=FakeProvider(),
+        equity=Equity(equity=1_050, day_start_equity=risk.day_start_equity, peak_equity=risk.peak_equity, day="2026-08-31"),
+        positions=[Position(ticker="AAPL", qty=2, avg_entry_price=100)],
+        closed_trades=runner.closed_trades,
+    )
+
+    assert shared.pnl_attribution["daily_pnl"] == 50
+    assert shared.pnl_attribution["realized_pnl"] == 10
