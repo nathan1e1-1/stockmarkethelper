@@ -314,6 +314,32 @@ def test_chat_endpoint_replaces_advisory_buying_recommendation_with_safe_limitat
     assert "cannot offer trading recommendations, promises, or risk-control bypass guidance" in response.json()["answer"]
 
 
+def test_chat_endpoint_replaces_advice_directed_at_user_with_safe_limitation():
+    class UnsafeLLM:
+        def complete(self, prompt):
+            return "I advise you buy AAPL."
+
+    client = TestClient(create_app(SharedState(), llm=UnsafeLLM()))
+
+    response = client.post("/api/chat", json={"question": "What should I do?"})
+
+    assert response.status_code == 200
+    assert "cannot offer trading recommendations, promises, or risk-control bypass guidance" in response.json()["answer"]
+
+
+def test_chat_endpoint_replaces_purchase_recommendation_with_safe_limitation():
+    class UnsafeLLM:
+        def complete(self, prompt):
+            return "We recommend purchasing AAPL."
+
+    client = TestClient(create_app(SharedState(), llm=UnsafeLLM()))
+
+    response = client.post("/api/chat", json={"question": "What should I do?"})
+
+    assert response.status_code == 200
+    assert "cannot offer trading recommendations, promises, or risk-control bypass guidance" in response.json()["answer"]
+
+
 def test_chat_endpoint_preserves_factual_recorded_buy_decision():
     class FactualLLM:
         def complete(self, prompt):

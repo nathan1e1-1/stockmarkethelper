@@ -16,12 +16,13 @@ _SAFE_READ_ONLY_LIMITATION = (
 )
 _UNSAFE_ANSWER_PATTERNS = (
     re.compile(
-        r"\b(?:you\s+should|(?:i\s+)?(?:advise|recommend|suggest)|consider)\s+"
-        r"(?:that\s+you\s+)?(?:to\s+)?(?:buy(?:ing)?|sell(?:ing)?)\b",
+        r"\b(?:you\s+should|(?:(?:i|we)\s+)?(?:advise(?:s|d|ing)?|recommend(?:s|ed|ing)?|"
+        r"suggest(?:s|ed|ing)?)|consider(?:s|ed|ing)?)\s+"
+        r"(?:(?:that\s+)?you\s+)?(?:to\s+)?(?:buy(?:ing)?|purchas(?:e|ing)|sell(?:ing)?|liquidat(?:e|ing))\b",
         re.IGNORECASE,
     ),
     re.compile(
-        r"(?m)^\s*(?:please\s+)?(?:buy|sell)\s+"
+        r"(?m)^\s*(?:please\s+)?(?:buy|purchase|sell)\s+"
         r"(?:[A-Z]{1,5}|\d+(?:\.\d+)?\s+(?:shares?|units?))\b",
         re.IGNORECASE,
     ),
