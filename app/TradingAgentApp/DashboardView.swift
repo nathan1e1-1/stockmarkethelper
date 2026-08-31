@@ -3,6 +3,7 @@ import Charts
 
 struct DashboardView: View {
     @ObservedObject private var client = EngineClient.shared
+    @State private var highlightedEquityPoint: EquityPoint?
 
     var body: some View {
         ScrollView {
@@ -145,24 +146,23 @@ struct DashboardView: View {
                     let lastPnl = (history.last?.equity ?? dayStart) - dayStart
                     let color = lastPnl >= 0 ? Color.gain : Color.loss
 
-                    Chart(history) { point in
-                        AreaMark(
-                            x: .value("Time", point.date),
-                            yStart: .value("P&L", 0.0),
-                            yEnd: .value("P&L", point.equity - dayStart)
-                        )
-                        .interpolationMethod(.monotone)
-                        .foregroundStyle(
-                            LinearGradient(colors: [color.opacity(0.25), .clear], startPoint: .top, endPoint: .bottom)
-                        )
-
-                        LineMark(x: .value("Time", point.date), y: .value("P&L", point.equity - dayStart))
-                            .interpolationMethod(.monotone)
-                            .foregroundStyle(color)
+                    Chart {
+                        ForEach(history) { point in
+                            pnlMarks(for: point, dayStart: dayStart, color: color)
+                        }
 
                         RuleMark(y: .value("Zero", 0.0))
                             .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
                             .foregroundStyle(Color.border)
+
+                        if let highlightedEquityPoint {
+                            RuleMark(x: .value("Selected time", highlightedEquityPoint.date))
+                                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                                .foregroundStyle(Color.mutedForeground)
+                                .annotation(position: .top) {
+                                    pnlTooltip(for: highlightedEquityPoint, dayStart: dayStart)
+                                }
+                        }
                     }
                     .chartYAxis {
                         AxisMarks(position: .leading) { _ in
@@ -178,11 +178,74 @@ struct DashboardView: View {
                                 .foregroundStyle(Color.mutedForeground)
                         }
                     }
+                    .chartOverlay { proxy in
+                        GeometryReader { geometry in
+                            Rectangle()
+                                .fill(.clear)
+                                .contentShape(Rectangle())
+                                .onContinuousHover { phase in
+                                    switch phase {
+                                    case .active(let location):
+                                        guard let plotAreaFrame = proxy.plotFrame else {
+                                            highlightedEquityPoint = nil
+                                            return
+                                        }
+                                        let plotFrame = geometry[plotAreaFrame]
+                                        guard plotFrame.contains(location),
+                                              let date = proxy.value(atX: location.x - plotFrame.origin.x, as: Date.self) else {
+                                            highlightedEquityPoint = nil
+                                            return
+                                        }
+                                        highlightedEquityPoint = nearestEquityPoint(to: date, in: history)
+                                    case .ended:
+                                        highlightedEquityPoint = nil
+                                    }
+                                }
+                        }
+                    }
                     .frame(height: 220)
                 }
             }
             .padding(20)
         }
+        .onChange(of: history.flatMap { [$0.t, $0.equity] }) { _, _ in
+            highlightedEquityPoint = nil
+        }
+    }
+
+    private func pnlTooltip(for point: EquityPoint, dayStart: Double) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(point.date.formatted(.dateTime.month(.abbreviated).day().hour().minute()))
+            Text("Equity \(point.equity.formatted(.currency(code: "USD")))")
+            Text("P&L \((point.equity - dayStart).formatted(.currency(code: "USD").sign(strategy: .always())))")
+        }
+        .font(.caption2.monospacedDigit())
+        .foregroundStyle(Color.foreground)
+        .padding(8)
+        .background(Color.background)
+        .clipShape(RoundedRectangle(cornerRadius: SRadius.sm, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: SRadius.sm, style: .continuous)
+                .stroke(Color.border, lineWidth: 1)
+        )
+    }
+
+    @ChartContentBuilder
+    private func pnlMarks(for point: EquityPoint, dayStart: Double, color: Color) -> some ChartContent {
+        let pnl = point.equity - dayStart
+        AreaMark(
+            x: .value("Time", point.date),
+            yStart: .value("P&L", 0.0),
+            yEnd: .value("P&L", pnl)
+        )
+        .interpolationMethod(.monotone)
+        .foregroundStyle(
+            LinearGradient(colors: [color.opacity(0.25), .clear], startPoint: .top, endPoint: .bottom)
+        )
+
+        LineMark(x: .value("Time", point.date), y: .value("P&L", pnl))
+            .interpolationMethod(.monotone)
+            .foregroundStyle(color)
     }
 
     @ViewBuilder
