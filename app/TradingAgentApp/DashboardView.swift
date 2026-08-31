@@ -159,7 +159,10 @@ struct DashboardView: View {
                             RuleMark(x: .value("Selected time", highlightedEquityPoint.date))
                                 .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
                                 .foregroundStyle(Color.mutedForeground)
-                                .annotation(position: .top) {
+                                .annotation(
+                                    position: .top,
+                                    overflowResolution: .init(x: .fit(to: .plot), y: .fit(to: .plot))
+                                ) {
                                     pnlTooltip(for: highlightedEquityPoint, dayStart: dayStart)
                                 }
                         }
