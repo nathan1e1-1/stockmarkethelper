@@ -28,6 +28,7 @@ struct ChatRequest: Codable {
 
 struct ChatResponse: Codable {
     let answer: String
+    let disclaimer: String
 }
 
 struct Equity: Codable {

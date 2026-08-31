@@ -17,10 +17,13 @@ final class TradingAgentAppTests: XCTestCase {
         XCTAssertEqual(String(decoding: data, as: UTF8.self), #""1Y""#)
     }
 
-    func testChatResponseDecodesAnswer() throws {
-        let data = #"{"answer":"Your account has no open positions."}"#.data(using: .utf8)!
+    func testChatResponseDecodesAnswerAndDisclosure() throws {
+        let data = #"{"answer":"Your account has no open positions.","disclaimer":"For informational purposes only — not investment advice. Use your own judgment."}"#.data(using: .utf8)!
 
-        XCTAssertEqual(try JSONDecoder().decode(ChatResponse.self, from: data).answer, "Your account has no open positions.")
+        let response = try JSONDecoder().decode(ChatResponse.self, from: data)
+
+        XCTAssertEqual(response.answer, "Your account has no open positions.")
+        XCTAssertEqual(response.disclaimer, "For informational purposes only — not investment advice. Use your own judgment.")
     }
 
     func testChatValidationDetailsProduceActionableQuestionMessage() {

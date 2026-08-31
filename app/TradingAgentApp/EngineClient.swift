@@ -80,7 +80,7 @@ final class EngineClient: ObservableObject {
         }
     }
 
-    func ask(_ question: String) async throws -> String {
+    func ask(_ question: String) async throws -> ChatResponse {
         var request = URLRequest(url: baseURL.appending(path: "/api/chat"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -91,7 +91,7 @@ final class EngineClient: ObservableObject {
             guard isSuccessful(response) else {
                 throw EngineClientError.message(Self.serverErrorMessage(from: data))
             }
-            return try JSONDecoder().decode(ChatResponse.self, from: data).answer
+            return try JSONDecoder().decode(ChatResponse.self, from: data)
         } catch let error as EngineClientError {
             throw error
         } catch is DecodingError {

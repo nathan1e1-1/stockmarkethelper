@@ -35,7 +35,7 @@ struct AITradeDeskView: View {
 
                 composerView
 
-                Text("Read-only informational analysis. No orders can be placed here.")
+                Text("For informational purposes only — not investment advice. Use your own judgment.")
                     .font(.caption)
                     .foregroundStyle(Color.mutedForeground)
             }
@@ -131,6 +131,14 @@ struct AITradeDeskView: View {
                     RoundedRectangle(cornerRadius: SRadius.md, style: .continuous)
                         .stroke(Color.border, lineWidth: message.role == .user ? 0 : 1)
                 )
+
+            if message.role == .assistant,
+               let disclaimer = message.disclaimer,
+               !disclaimer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text(disclaimer)
+                    .font(.caption2)
+                    .foregroundStyle(Color.mutedForeground)
+            }
         }
         .frame(maxWidth: .infinity, alignment: message.role == .user ? .trailing : .leading)
     }
@@ -201,7 +209,7 @@ struct AITradeDeskView: View {
         let trimmedQuestion = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedQuestion.isEmpty, !composer.isLoading else { return }
 
-        messages.append(ChatMessage(role: .user, text: trimmedQuestion))
+        messages.append(ChatMessage(role: .user, text: trimmedQuestion, disclaimer: nil))
         composer.draft = ""
         errorMessage = nil
         retryQuestion = trimmedQuestion
@@ -219,8 +227,14 @@ struct AITradeDeskView: View {
 
         Task {
             do {
-                let answer = try await client.ask(question)
-                messages.append(ChatMessage(role: .assistant, text: answer))
+                let response = try await client.ask(question)
+                messages.append(
+                    ChatMessage(
+                        role: .assistant,
+                        text: response.answer,
+                        disclaimer: response.disclaimer
+                    )
+                )
                 retryQuestion = nil
             } catch {
                 errorMessage = error.localizedDescription
@@ -239,4 +253,5 @@ private struct ChatMessage: Identifiable {
     let id = UUID()
     let role: Role
     let text: String
+    let disclaimer: String?
 }
