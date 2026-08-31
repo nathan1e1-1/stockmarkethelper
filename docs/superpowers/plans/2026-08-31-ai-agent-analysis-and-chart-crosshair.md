@@ -405,8 +405,29 @@ without accepting an invented or undated recommendation.
 ### Task 6: Enforce the strict sentence-level output policy
 
 **Files:**
+- Modify: `engine/src/autotrader/models.py`
+- Modify: `engine/src/autotrader/state.py`
 - Modify: `engine/src/autotrader/ipc.py`
+- Modify: `engine/tests/test_models.py`
+- Modify: `engine/tests/test_state.py`
 - Modify: `engine/tests/test_ipc.py`
+
+- [ ] **Step 0: Record and restore a decision timestamp**
+
+Add `timestamp: datetime = field(default_factory=_now)` to `AgentDecision` in
+`engine/src/autotrader/models.py`. Extend `_decode_decision` in
+`engine/src/autotrader/state.py` to parse a persisted ISO timestamp when
+present, using `datetime.fromisoformat(value.replace("Z", "+00:00"))`, and let
+the dataclass default supply a timestamp for legacy state that lacks it.
+
+Add a model test that an `AgentDecision` gets a timezone-aware timestamp and a
+state round-trip test that a fixed timestamp survives save/load. Run
+`PYTHONPATH=engine/src /Users/nthnp/Developer/stockmarkethelper/engine/.venv/bin/python -m pytest engine/tests/test_models.py engine/tests/test_state.py -q` red before implementation and green after it. Commit this prerequisite as:
+
+```bash
+git add engine/src/autotrader/models.py engine/src/autotrader/state.py engine/tests/test_models.py engine/tests/test_state.py
+git commit -m "feat: timestamp recorded decisions"
+```
 
 - [ ] **Step 1: Write failing boundary tests**
 
