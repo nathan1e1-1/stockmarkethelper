@@ -23,7 +23,7 @@ _UNSAFE_ANSWER_PATTERNS = (
         re.IGNORECASE,
     ),
     re.compile(
-        r"(?m)^\s*(?:please\s+)?(?:buy|purchase|sell)\s+"
+        r"(?m)^\s*(?:please\s+)?(?:buy|purchase|sell|hold)\s+"
         r"(?:[A-Z]{1,5}|\d+(?:\.\d+)?\s+(?:shares?|units?))\b",
         re.IGNORECASE,
     ),

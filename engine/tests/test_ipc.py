@@ -360,6 +360,22 @@ def test_chat_endpoint_replaces_personalized_hold_instruction_with_safe_limitati
     }
 
 
+def test_chat_endpoint_replaces_direct_hold_instruction_with_safe_limitation():
+    class UnsafeLLM:
+        def complete(self, prompt):
+            return "Hold AAPL."
+
+    client = TestClient(create_app(SharedState(), llm=UnsafeLLM()))
+
+    response = client.post("/api/chat", json={"question": "What should I do?"})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "answer": _SAFE_READ_ONLY_LIMITATION,
+        "disclaimer": _INFORMATIONAL_DISCLAIMER,
+    }
+
+
 def test_chat_endpoint_replaces_advisory_buying_recommendation_with_safe_limitation():
     class UnsafeLLM:
         def complete(self, prompt):
