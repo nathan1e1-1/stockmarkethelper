@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import Any
 
 from autotrader.models import ClosedTrade, Equity, Position
+from autotrader.market import EASTERN
 
 
 def build_pnl_snapshot(
@@ -69,4 +70,4 @@ def build_pnl_snapshot(
 
 
 def _closed_on_day(closed_at: datetime, day: str) -> bool:
-    return closed_at.date().isoformat() == day
+    return closed_at.astimezone(EASTERN).date().isoformat() == day

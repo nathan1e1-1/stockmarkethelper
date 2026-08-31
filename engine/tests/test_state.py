@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from autotrader.state import StateStore, State
 from autotrader.models import Equity
 
@@ -29,12 +31,21 @@ def test_state_roundtrips_decision_type(tmp_path):
 
 def test_state_roundtrips_closed_trades(tmp_path):
     store = StateStore(tmp_path)
-    t = ClosedTrade(ticker="NVDA", qty=10.0, entry_price=100.0, exit_price=103.0, realized_pnl=30.0, exit_reason="take_profit")
+    t = ClosedTrade(
+        ticker="NVDA",
+        qty=10.0,
+        entry_price=100.0,
+        exit_price=103.0,
+        realized_pnl=30.0,
+        exit_reason="take_profit",
+        closed_at=datetime(2026, 8, 31, 15, tzinfo=timezone.utc),
+    )
     store.save(State(closed_trades=[t]))
     loaded = store.load()
     assert len(loaded.closed_trades) == 1
     assert loaded.closed_trades[0].realized_pnl == 30.0
     assert loaded.closed_trades[0].exit_reason == "take_profit"
+    assert loaded.closed_trades[0].closed_at == t.closed_at
 
 
 def test_save_survives_disk_full(tmp_path, monkeypatch):

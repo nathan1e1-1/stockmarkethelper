@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from autotrader.models import ClosedTrade, Equity, Position
 from autotrader.pnl import build_pnl_snapshot
 from autotrader.main import publish_pnl_attribution, restore_same_day_state
-from autotrader.state import State
+from autotrader.state import State, StateStore
 
 
 def test_pnl_snapshot_separates_daily_realized_and_unrealized_contributors():
@@ -107,6 +107,37 @@ def test_pnl_snapshot_sorts_available_positions_by_absolute_unrealized_pnl():
     assert [position["ticker"] for position in snapshot["open_positions"]] == ["MSFT", "AAPL"]
 
 
+def test_pnl_snapshot_uses_eastern_trading_date_for_realized_trades():
+    snapshot = build_pnl_snapshot(
+        equity=Equity(equity=1000, day_start_equity=1000, peak_equity=1000, day="2026-08-31"),
+        positions=[],
+        prices={},
+        closed_trades=[
+            ClosedTrade(
+                ticker="AAPL",
+                qty=1,
+                entry_price=100,
+                exit_price=110,
+                realized_pnl=10,
+                exit_reason="take profit",
+                closed_at=datetime(2026, 9, 1, 3, 59, tzinfo=timezone.utc),
+            ),
+            ClosedTrade(
+                ticker="MSFT",
+                qty=1,
+                entry_price=100,
+                exit_price=120,
+                realized_pnl=20,
+                exit_reason="take profit",
+                closed_at=datetime(2026, 9, 1, 4, 0, tzinfo=timezone.utc),
+            ),
+        ],
+    )
+
+    assert snapshot["realized_pnl"] == 10
+    assert [trade["ticker"] for trade in snapshot["realized_trades"]] == ["AAPL"]
+
+
 def test_publish_pnl_attribution_keeps_other_positions_when_a_price_lookup_fails():
     class FakeProvider:
         def latest_price(self, ticker):
@@ -134,7 +165,7 @@ def test_publish_pnl_attribution_keeps_other_positions_when_a_price_lookup_fails
     assert shared.pnl_attribution["open_positions"][1]["current_price"] is None
 
 
-def test_same_day_restart_restores_closed_trades_before_publishing_pnl_attribution():
+def test_same_day_restart_restores_journalled_closed_trades_before_publishing_pnl_attribution(tmp_path):
     class FakeProvider:
         def latest_price(self, ticker):
             return 110
@@ -150,7 +181,7 @@ def test_same_day_restart_restores_closed_trades_before_publishing_pnl_attributi
     class FakeSharedState:
         pnl_attribution = None
 
-    restored_state = State(
+    journalled_state = State(
         equity=Equity(equity=1_040, day_start_equity=1_000, peak_equity=1_060, day="2026-08-31"),
         closed_trades=[
             ClosedTrade(
@@ -167,6 +198,9 @@ def test_same_day_restart_restores_closed_trades_before_publishing_pnl_attributi
     runner = FakeRunner()
     risk = FakeRisk()
     shared = FakeSharedState()
+    store = StateStore(tmp_path)
+    store.save(journalled_state)
+    restored_state = store.load()
 
     assert restore_same_day_state(restored_state, "2026-08-31", runner, risk) is True
     publish_pnl_attribution(
