@@ -1,5 +1,6 @@
 import json
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 from autotrader.models import AgentDecision, ClosedTrade, Decision, Equity, Position, Signal, SignalSet
@@ -34,6 +35,15 @@ def _decode_decision(d: dict) -> AgentDecision:
     )
 
 
+def _decode_closed_trade(trade: dict) -> ClosedTrade:
+    decoded = dict(trade)
+    for field_name in ("opened_at", "closed_at"):
+        value = decoded.get(field_name)
+        if isinstance(value, str):
+            decoded[field_name] = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return ClosedTrade(**decoded)
+
+
 def same_day(state: State, day: str) -> bool:
     return state.equity is not None and state.equity.day == day
 
@@ -51,7 +61,7 @@ class StateStore:
             equity=Equity(**eq) if eq else None,
             positions=[Position(**p) for p in raw.get("positions", [])],
             decisions=[_decode_decision(d) for d in raw.get("decisions", [])],
-            closed_trades=[ClosedTrade(**c) for c in raw.get("closed_trades", [])],
+            closed_trades=[_decode_closed_trade(c) for c in raw.get("closed_trades", [])],
             unrealized_pnl=raw.get("unrealized_pnl", 0.0),
         )
 
