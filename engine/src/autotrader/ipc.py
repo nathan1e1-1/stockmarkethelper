@@ -125,13 +125,13 @@ def create_app(state: SharedState, provider=None, llm=None) -> FastAPI:
 
     @app.get("/api/bars")
     def bars(
-        ticker: str = "",
+        ticker: str = Query(..., min_length=1, pattern=r"^[A-Z]{1,5}(?:[.-][A-Z]{1,2})?$"),
         history_range: HistoryRange = Query(HistoryRange.ONE_DAY, alias="range"),
     ) -> dict[str, Any]:
-        if not ticker or provider is None:
+        if provider is None:
             return {"bars": []}
         try:
-            return {"bars": provider.bars(ticker.upper(), history_range=history_range)}
+            return {"bars": provider.bars(ticker, history_range=history_range)}
         except Exception:
             return {"bars": []}
 

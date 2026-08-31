@@ -1,4 +1,6 @@
 from fastapi.testclient import TestClient
+import pytest
+
 from autotrader.history import HistoryRange
 from autotrader.ipc import create_app, SharedState
 from autotrader.models import AgentDecision, Decision, Equity, Position
@@ -96,12 +98,30 @@ def test_bars_endpoint_rejects_invalid_public_range_without_calling_provider():
     assert provider.calls == []
 
 
-def test_bars_endpoint_empty_without_ticker():
+@pytest.mark.parametrize("ticker", ["", " ", " AAPL", "AAPL ", "aapl", "AAPL!", "AAPL/US"])
+def test_bars_endpoint_rejects_invalid_tickers_without_calling_provider(ticker):
+    class FakeProvider:
+        def __init__(self):
+            self.calls = []
+
+        def bars(self, ticker, history_range=HistoryRange.ONE_DAY):
+            self.calls.append((ticker, history_range))
+            return []
+
+    provider = FakeProvider()
+    client = TestClient(create_app(SharedState(), provider=provider))
+
+    response = client.get("/api/bars", params={"ticker": ticker})
+
+    assert response.status_code == 422
+    assert provider.calls == []
+
+
+def test_bars_endpoint_rejects_missing_ticker():
     state = SharedState()
     client = TestClient(create_app(state))
     r = client.get("/api/bars")
-    assert r.status_code == 200
-    assert r.json()["bars"] == []
+    assert r.status_code == 422
 
 
 def test_assets_endpoint_searches_provider_and_caps_limit():

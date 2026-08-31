@@ -38,6 +38,8 @@ class FixtureProvider:
         self,
         ticker: str,
         history_range: HistoryRange = HistoryRange.ONE_DAY,
+        *,
+        limit: int | None = None,
     ) -> list[dict]:
         # Clean uptrend so momentum is strongly positive.
         request = HistoryRequest.for_range(history_range)
@@ -64,7 +66,7 @@ class FixtureProvider:
                     "volume": float(1_000 + index),
                 }
             )
-        return thin_bars(bars, request.max_bars)
+        return thin_bars(bars, limit if limit is not None else request.max_bars)
 
     def news(self, ticker: str, limit: int = 5) -> list[dict]:
         return [

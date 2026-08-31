@@ -303,7 +303,7 @@ struct ChartsView: View {
         case .fiveDays: return "5-minute bars"
         case .oneMonth: return "hourly bars"
         case .sixMonths, .oneYear: return "daily bars"
-        case .max: return "weekly bars"
+        case .max: return "daily bars (thinned)"
         }
     }
 
