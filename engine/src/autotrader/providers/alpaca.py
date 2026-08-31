@@ -11,10 +11,13 @@ from alpaca.data import (
     StockHistoricalDataClient,
     StockLatestTradeRequest,
 )
-from alpaca.data.timeframe import TimeFrame
 from alpaca.trading.client import TradingClient
+from alpaca.trading.enums import AssetClass, AssetStatus
+from alpaca.trading.requests import GetAssetsRequest
+from alpaca.data.timeframe import TimeFrame
 
 from autotrader.config import Config
+from autotrader.history import HistoryRange, HistoryRequest, thin_bars
 
 
 class AlpacaProvider:
@@ -23,6 +26,7 @@ class AlpacaProvider:
         self._news = NewsClient(cfg.alpaca_api_key, cfg.alpaca_secret_key)
         self._screeners = ScreenerClient(cfg.alpaca_api_key, cfg.alpaca_secret_key)
         self._trading = TradingClient(cfg.alpaca_api_key, cfg.alpaca_secret_key, paper=cfg.alpaca_paper)
+        self._asset_search_cache: list[dict[str, str]] | None = None
 
     def latest_price(self, ticker: str) -> float:
         req = StockLatestTradeRequest(symbol_or_symbols=[ticker], feed=DataFeed.IEX)
@@ -36,12 +40,46 @@ class AlpacaProvider:
         trades = self._data.get_stock_latest_trade(req)
         return {t: float(v.price) for t, v in trades.items()}
 
-    def bars(self, ticker: str, limit: int = 50) -> list[dict]:
-        end = datetime.now(timezone.utc)
-        start = end - timedelta(days=7)
-        req = StockBarsRequest(symbol_or_symbols=[ticker], timeframe=TimeFrame.Minute, start=start, end=end, limit=limit, feed=DataFeed.IEX)
+    def search_assets(self, query: str, limit: int = 10) -> list[dict]:
+        if self._asset_search_cache is None:
+            request = GetAssetsRequest(status=AssetStatus.ACTIVE, asset_class=AssetClass.US_EQUITY)
+            assets = self._trading.get_all_assets(request)
+            self._asset_search_cache = [
+                {"ticker": asset.symbol, "name": asset.name}
+                for asset in assets
+                if asset.tradable
+            ]
+
+        normalized_query = query.casefold()
+        matches = [
+            asset
+            for asset in self._asset_search_cache
+            if normalized_query in asset["ticker"].casefold()
+            or normalized_query in asset["name"].casefold()
+        ]
+        matches.sort(
+            key=lambda asset: (
+                normalized_query not in asset["ticker"].casefold(),
+                asset["ticker"],
+            )
+        )
+        return matches[:limit]
+
+    def bars(
+        self,
+        ticker: str,
+        history_range: HistoryRange = HistoryRange.ONE_DAY,
+    ) -> list[dict]:
+        history = HistoryRequest.for_range(history_range)
+        req = StockBarsRequest(
+            symbol_or_symbols=[ticker],
+            timeframe=history.timeframe,
+            start=history.start,
+            end=history.end,
+            feed=DataFeed.IEX,
+        )
         bars = self._data.get_stock_bars(req)[ticker]
-        return [
+        normalized_bars = [
             {
                 "t": b.timestamp.isoformat(),
                 "open": float(b.open),
@@ -51,6 +89,30 @@ class AlpacaProvider:
                 "volume": float(b.volume),
             }
             for b in bars
+        ]
+        return thin_bars(normalized_bars, history.max_bars)
+
+    def scan_bars(self, ticker: str) -> list[dict]:
+        end = datetime.now(timezone.utc)
+        req = StockBarsRequest(
+            symbol_or_symbols=[ticker],
+            timeframe=TimeFrame.Minute,
+            start=end - timedelta(days=7),
+            end=end,
+            limit=50,
+            feed=DataFeed.IEX,
+        )
+        bars = self._data.get_stock_bars(req)[ticker]
+        return [
+            {
+                "t": bar.timestamp.isoformat(),
+                "open": float(bar.open),
+                "high": float(bar.high),
+                "low": float(bar.low),
+                "close": float(bar.close),
+                "volume": float(bar.volume),
+            }
+            for bar in bars
         ]
 
     def news(self, ticker: str, limit: int = 5) -> list[dict]:

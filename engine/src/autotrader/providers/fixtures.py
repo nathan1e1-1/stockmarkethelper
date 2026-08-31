@@ -1,3 +1,10 @@
+from datetime import datetime, timedelta, timezone
+
+from alpaca.data.timeframe import TimeFrameUnit
+
+from autotrader.history import HistoryRange, HistoryRequest, thin_bars
+
+
 class FixtureProvider:
     """Deterministic in-memory provider for tests and replay."""
 
@@ -7,11 +14,70 @@ class FixtureProvider:
     def latest_prices(self, tickers: list[str]) -> dict[str, float]:
         return {t: self.latest_price(t) for t in tickers}
 
-    def bars(self, ticker: str, limit: int = 50) -> list[dict]:
+    def search_assets(self, query: str, limit: int = 10) -> list[dict]:
+        assets = [
+            {"ticker": "AAPL", "name": "Apple Inc."},
+            {"ticker": "MSFT", "name": "Microsoft Corporation"},
+        ]
+        normalized_query = query.casefold()
+        matches = [
+            asset
+            for asset in assets
+            if normalized_query in asset["ticker"].casefold()
+            or normalized_query in asset["name"].casefold()
+        ]
+        matches.sort(
+            key=lambda asset: (
+                normalized_query not in asset["ticker"].casefold(),
+                asset["ticker"],
+            )
+        )
+        return matches[:limit]
+
+    def bars(
+        self,
+        ticker: str,
+        history_range: HistoryRange = HistoryRange.ONE_DAY,
+    ) -> list[dict]:
         # Clean uptrend so momentum is strongly positive.
+        request = HistoryRequest.for_range(history_range)
+        interval = {
+            TimeFrameUnit.Minute: timedelta(minutes=request.timeframe.amount),
+            TimeFrameUnit.Hour: timedelta(hours=request.timeframe.amount),
+            TimeFrameUnit.Day: timedelta(days=request.timeframe.amount),
+        }[request.timeframe.unit]
+        periods = int((request.end - request.start) // interval)
+        timestamps = [request.start + interval * index for index in range(periods + 1)]
+        if timestamps[-1] < request.end:
+            timestamps.append(request.end)
+
+        bars = []
+        for index, timestamp in enumerate(timestamps):
+            close = 100.0 + index
+            bars.append(
+                {
+                    "t": timestamp.isoformat(),
+                    "open": close - 0.5,
+                    "high": close + 0.5,
+                    "low": close - 1.0,
+                    "close": close,
+                    "volume": float(1_000 + index),
+                }
+            )
+        return thin_bars(bars, request.max_bars)
+
+    def scan_bars(self, ticker: str) -> list[dict]:
+        start = datetime(2026, 8, 25, tzinfo=timezone.utc)
         return [
-            {"t": f"2026-08-25T13:{i:02d}:00Z", "close": 100.0 + i}
-            for i in range(limit)
+            {
+                "t": (start + timedelta(minutes=index)).isoformat(),
+                "open": 99.5 + index,
+                "high": 100.5 + index,
+                "low": 99.0 + index,
+                "close": 100.0 + index,
+                "volume": float(1_000 + index),
+            }
+            for index in range(50)
         ]
 
     def news(self, ticker: str, limit: int = 5) -> list[dict]:

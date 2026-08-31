@@ -24,7 +24,7 @@ class Runner:
         self.flattened = False
 
     def compute_signalset(self, ticker: str) -> SignalSet:
-        bars = self.provider.bars(ticker)
+        bars = self.provider.scan_bars(ticker)
         signals = [self.momentum.compute(ticker, bars)]
         if self.sentiment is not None:
             signals.append(self.sentiment.compute(ticker, self.provider.news(ticker)))

@@ -1,5 +1,35 @@
 import Foundation
 
+struct Asset: Codable, Identifiable {
+    let ticker: String
+    let name: String
+
+    var id: String { ticker }
+}
+
+struct AssetSearchResponse: Codable {
+    let assets: [Asset]
+}
+
+enum ChartRange: String, CaseIterable, Codable, Identifiable {
+    case oneDay = "1D"
+    case fiveDays = "5D"
+    case oneMonth = "1M"
+    case sixMonths = "6M"
+    case oneYear = "1Y"
+    case max = "MAX"
+
+    var id: String { rawValue }
+}
+
+struct ChatRequest: Codable {
+    let question: String
+}
+
+struct ChatResponse: Codable {
+    let answer: String
+}
+
 struct Equity: Codable {
     let equity: Double
     let day_start_equity: Double
