@@ -476,6 +476,22 @@ def test_chat_endpoint_preserves_factual_recorded_hold_decision():
     }
 
 
+def test_chat_endpoint_preserves_factual_recorded_ticker_rating():
+    class FactualLLM:
+        def complete(self, prompt):
+            return "AAPL is a buy according to the recorded decision at 09:30."
+
+    client = TestClient(create_app(SharedState(), llm=FactualLLM()))
+
+    response = client.post("/api/chat", json={"question": "What was the decision?"})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "answer": "AAPL is a buy according to the recorded decision at 09:30.",
+        "disclaimer": _INFORMATIONAL_DISCLAIMER,
+    }
+
+
 def test_chat_endpoint_replaces_direct_order_recommendation_with_safe_limitation():
     class UnsafeLLM:
         def complete(self, prompt):

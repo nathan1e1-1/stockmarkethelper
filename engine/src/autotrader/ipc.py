@@ -32,7 +32,11 @@ _UNSAFE_ANSWER_PATTERNS = (
         r".{0,80}\b(?:right move|right choice|good idea|best choice)\b",
         re.IGNORECASE,
     ),
-    re.compile(r"(?m)^\s*[A-Z]{1,5}\s+is\s+(?:a\s+)?(?:buy|sell|hold)\b", re.IGNORECASE),
+    re.compile(
+        r"(?m)^\s*[A-Z]{1,5}\s+is\s+(?:a\s+)?(?:buy|sell|hold)\b"
+        r"(?!\s+according\s+to\s+(?:the\s+)?(?:recorded|agent)\s+decision\b)",
+        re.IGNORECASE,
+    ),
     re.compile(
         r"(?m)^\s*avoid\s+(?:buy(?:ing)?|purchas(?:e|ing)|sell(?:ing)?|hold(?:ing)?)\s+[A-Z]{1,5}\b",
         re.IGNORECASE,
