@@ -26,6 +26,15 @@ final class TradingAgentAppTests: XCTestCase {
         XCTAssertEqual(response.disclaimer, "For informational purposes only — not investment advice. Use your own judgment.")
     }
 
+    func testChatResponseDecodesLegacyAnswerWithFallbackDisclosure() throws {
+        let data = #"{"answer":"Your account has no open positions."}"#.data(using: .utf8)!
+
+        let response = try JSONDecoder().decode(ChatResponse.self, from: data)
+
+        XCTAssertEqual(response.answer, "Your account has no open positions.")
+        XCTAssertEqual(response.disclaimer, "For informational purposes only — not investment advice. Use your own judgment.")
+    }
+
     func testChatValidationDetailsProduceActionableQuestionMessage() {
         let arrayDetail = #"{"detail":[{"type":"string_too_short","loc":["body","question"],"msg":"String should have at least 1 character"}]}"#.data(using: .utf8)!
         let objectDetail = #"{"detail":{"type":"string_too_short","loc":["body","question"],"msg":"String should have at least 1 character"}}"#.data(using: .utf8)!

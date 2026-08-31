@@ -27,8 +27,21 @@ struct ChatRequest: Codable {
 }
 
 struct ChatResponse: Codable {
+    static let fallbackDisclaimer = "For informational purposes only — not investment advice. Use your own judgment."
+
     let answer: String
     let disclaimer: String
+
+    private enum CodingKeys: String, CodingKey {
+        case answer
+        case disclaimer
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        answer = try container.decode(String.self, forKey: .answer)
+        disclaimer = try container.decodeIfPresent(String.self, forKey: .disclaimer) ?? Self.fallbackDisclaimer
+    }
 }
 
 struct Equity: Codable {
