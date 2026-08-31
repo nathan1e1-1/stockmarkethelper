@@ -377,6 +377,12 @@ def test_chat_endpoint_returns_safe_retry_error_for_ollama_unavailable_sentinel(
         "AAPL is a buy according to the recorded decision today.",
         "Go long AAPL.",
         "Proceed without risk controls.",
+        "Use a 5% stop loss.",
+        "I would use a stop loss.",
+        "Hedge the position with puts.",
+        "Rebalance to 60/40.",
+        "The target is $250.",
+        "The stock is expected to reach $250.",
     ],
 )
 def test_chat_endpoint_replaces_strict_policy_violations_with_safe_limitation(
@@ -425,6 +431,22 @@ def test_chat_endpoint_preserves_sourced_dated_historical_decision(state_with_re
     assert response.status_code == 200
     assert response.json() == {
         "answer": "The engine decision log recorded BUY AAPL on 2026-08-31.",
+        "disclaimer": _INFORMATIONAL_DISCLAIMER,
+    }
+
+
+def test_chat_endpoint_preserves_sourced_dated_historical_risk_measure(state_with_recorded_decision):
+    class HistoricalLLM:
+        def complete(self, prompt):
+            return "The engine decision log recorded the daily stop was disabled on 2026-08-31."
+
+    client = TestClient(create_app(state_with_recorded_decision, llm=HistoricalLLM()))
+
+    response = client.post("/api/chat", json={"question": "What risk action was recorded?"})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "answer": "The engine decision log recorded the daily stop was disabled on 2026-08-31.",
         "disclaimer": _INFORMATIONAL_DISCLAIMER,
     }
 

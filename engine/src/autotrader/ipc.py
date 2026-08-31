@@ -19,6 +19,7 @@ _ACTION_LANGUAGE = re.compile(
     r"\b(?:buy|buying|bought|sell|selling|sold|hold|holding|held|trade|trading|traded|"
     r"order|orders|ordered|ordering|purchase|purchases|purchased|purchasing|liquidate|"
     r"liquidates|liquidated|liquidating|enter|enters|entered|entering|exit|exits|exited|exiting|"
+    r"hedge|hedges|hedged|hedging|rebalance|rebalances|rebalanced|rebalancing|"
     r"(?:go|stay|get)\s+(?:long|short))\b",
     re.IGNORECASE,
 )
@@ -30,7 +31,8 @@ _ADVICE_FRAMING = re.compile(
     re.IGNORECASE,
 )
 _PROSPECTIVE_FRAMING = re.compile(
-    r"\b(?:will|could|may|might|likely|entry|breakout|rally|forecast|predict(?:s|ed|ing)?)\b",
+    r"\b(?:will|would|could|may|might|likely|expect(?:s|ed|ing)?|entry|breakout|rally|"
+    r"forecast|predict(?:s|ed|ing)?)\b",
     re.IGNORECASE,
 )
 _RISK_CONTROL_BYPASS = re.compile(
@@ -42,7 +44,8 @@ _RISK_CONTROL_BYPASS = re.compile(
     r"risk\s+controls?)\s+to\s+(?:false|off|disabled|inactive)\b|\bturn\b.{0,80}"
     r"\b(?:risk|kill\s+switch|daily\s+stop|stop\s+loss|controls?)\b.{0,80}\b(?:off|on)\b|"
     r"\b(?:proceed|continue|trade)\s+without\s+(?:risk|risk\s+controls?|kill\s+switch|"
-    r"daily\s+stop|stop\s+loss)\b)",
+    r"daily\s+stop|stop\s+loss)\b|\b(?:use|set|place|apply)\b.{0,80}\b(?:risk|"
+    r"kill\s+switch|daily\s+stop|stop\s+loss|risk\s+controls?)\b)",
     re.IGNORECASE,
 )
 _PROMISE_FRAMING = re.compile(
@@ -52,6 +55,7 @@ _PROMISE_FRAMING = re.compile(
     re.IGNORECASE,
 )
 _HISTORICAL_ATTRIBUTION = re.compile(r"\b(?:recorded|logged|executed|filed)\b", re.IGNORECASE)
+_PRICE_TARGET = re.compile(r"\btarget\s+(?:is|of|at|to)\s+\$?\d", re.IGNORECASE)
 
 
 class SharedState:
@@ -130,11 +134,14 @@ def _filter_actionable_sentences(answer: str, allowed_decision_dates: set[str]) 
         if (
             _ADVICE_FRAMING.search(sentence)
             or _PROSPECTIVE_FRAMING.search(sentence)
-            or _RISK_CONTROL_BYPASS.search(sentence)
+            or _PRICE_TARGET.search(sentence)
             or _PROMISE_FRAMING.search(sentence)
         ):
             continue
-        if _ACTION_LANGUAGE.search(sentence) and not _is_historical_record(sentence, allowed_decision_dates):
+        historical_record = _is_historical_record(sentence, allowed_decision_dates)
+        if _RISK_CONTROL_BYPASS.search(sentence) and not historical_record:
+            continue
+        if _ACTION_LANGUAGE.search(sentence) and not historical_record:
             continue
         factual_sentences.append(sentence)
     return " ".join(factual_sentences)
