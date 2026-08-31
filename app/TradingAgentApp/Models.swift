@@ -114,3 +114,15 @@ struct Bar: Codable, Identifiable {
         case v = "volume"
     }
 }
+
+func nearestBar(to date: Date, in bars: [Bar]) -> Bar? {
+    bars.min { lhs, rhs in
+        abs(lhs.date.timeIntervalSince(date)) < abs(rhs.date.timeIntervalSince(date))
+    }
+}
+
+func nearestEquityPoint(to date: Date, in points: [EquityPoint]) -> EquityPoint? {
+    points.min { lhs, rhs in
+        abs(lhs.date.timeIntervalSince(date)) < abs(rhs.date.timeIntervalSince(date))
+    }
+}
