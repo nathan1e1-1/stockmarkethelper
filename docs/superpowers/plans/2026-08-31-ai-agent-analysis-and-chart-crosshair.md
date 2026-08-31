@@ -1,0 +1,392 @@
+# AI Agent Analysis and Chart Crosshair Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use `subagent-driven-development` (recommended) or `executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Let the read-only assistant explain supplied trading data with a clear informational disclaimer, and add exact hover inspection to stock and dashboard P&L charts.
+
+**Architecture:** The FastAPI chat endpoint will retain the existing output guardrail but return a structured answer plus a required disclaimer, and its prompt will explicitly permit factual analysis. The Swift app will render the response disclaimer and use reusable nearest-datum helpers plus Swift Charts overlays to draw a crosshair and contextual tooltip in both existing charts.
+
+**Tech Stack:** Python 3.11, FastAPI, pytest, Swift 5.9, SwiftUI, Swift Charts, XCTest.
+
+---
+
+## File structure
+
+- `engine/src/autotrader/ipc.py` — owns the informational disclosure, assistant prompt, and safe chat response shape.
+- `engine/tests/test_ipc.py` — verifies the analysis prompt, disclosure, and output guardrail.
+- `app/TradingAgentApp/Models.swift` — decodes the structured chat response and provides testable nearest-datum helpers.
+- `app/TradingAgentApp/EngineClient.swift` — returns the structured response to the view layer.
+- `app/TradingAgentApp/AITradeDeskView.swift` — displays the API disclosure below each assistant response and in the panel footer.
+- `app/TradingAgentApp/ChartsView.swift` — adds stock-candle crosshair state, hover handling, and OHLC/volume tooltip.
+- `app/TradingAgentApp/DashboardView.swift` — adds dashboard P&L crosshair state, hover handling, and equity/P&L tooltip.
+- `app/TradingAgentApp/Tests/TradingAgentAppTests.swift` — tests response decoding and nearest-datum selection.
+
+### Task 1: Return analysis-ready, guarded chat responses
+
+**Files:**
+- Modify: `engine/tests/test_ipc.py`
+- Modify: `engine/src/autotrader/ipc.py`
+
+- [ ] **Step 1: Write failing API tests for permitted analysis, disclosure, and blocked advice**
+
+Add these tests to `engine/tests/test_ipc.py` using a `FakeLLM` that returns the literal answer shown:
+
+```python
+def test_chat_endpoint_explicitly_permits_factual_analysis_and_returns_disclosure():
+    class FakeLLM:
+        def __init__(self):
+            self.prompt = ""
+
+        def complete(self, prompt):
+            self.prompt = prompt
+            return "Today's loss is primarily unrealized and comes from the supplied open-position data."
+
+    llm = FakeLLM()
+    client = TestClient(create_app(SharedState(), llm=llm))
+
+    response = client.post("/api/chat", json={"question": "What is driving today's P&L?"})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "answer": "Today's loss is primarily unrealized and comes from the supplied open-position data.",
+        "disclaimer": "For informational purposes only — not investment advice. Use your own judgment.",
+    }
+    assert "You may explain factual account, P&L, position, decision, and market data" in llm.prompt
+    assert "Do not give personalized buy, sell, or hold instructions" in llm.prompt
+
+
+def test_chat_endpoint_keeps_disclosure_when_output_is_unsafe():
+    class UnsafeLLM:
+        def complete(self, prompt):
+            return "You should buy AAPL now."
+
+    client = TestClient(create_app(SharedState(), llm=UnsafeLLM()))
+
+    response = client.post("/api/chat", json={"question": "What should I do?"})
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == _SAFE_READ_ONLY_LIMITATION
+    assert response.json()["disclaimer"] == _INFORMATIONAL_DISCLAIMER
+```
+
+Update all existing successful chat response assertions to include the exact `disclaimer` field, and import `_INFORMATIONAL_DISCLAIMER` and `_SAFE_READ_ONLY_LIMITATION` from `autotrader.ipc` where tests compare constants.
+
+- [ ] **Step 2: Run the focused tests and verify they fail**
+
+Run: `engine/.venv/bin/python -m pytest engine/tests/test_ipc.py -q`
+
+Expected: failures because successful `/api/chat` responses do not yet include `disclaimer`, and the prompt does not include the factual-analysis instruction.
+
+- [ ] **Step 3: Implement explicit analysis permission and a structured disclosure**
+
+In `engine/src/autotrader/ipc.py`, define the disclosure next to `_UNAVAILABLE_LLM_RESPONSE`:
+
+```python
+_INFORMATIONAL_DISCLAIMER = (
+    "For informational purposes only — not investment advice. Use your own judgment."
+)
+```
+
+Replace the first sentence of the chat prompt with wording that both enables and bounds analysis:
+
+```python
+"You may explain factual account, P&L, position, decision, and market data; identify "
+"observed trends, contributors, uncertainty, and non-prescriptive risk context. "
+"Do not give personalized buy, sell, or hold instructions, order actions, promised "
+"returns, or guidance to disable or bypass risk controls. "
+```
+
+Keep the untrusted-data delimiters, missing-data rule, and P&L attribution instructions unchanged. Change both successful return paths so they always return this exact shape:
+
+```python
+{"answer": answer_or_safe_limitation, "disclaimer": _INFORMATIONAL_DISCLAIMER}
+```
+
+Do not change `_UNSAFE_ANSWER_PATTERNS`; it remains the server-side enforcement point for LLM output.
+
+- [ ] **Step 4: Run the focused tests and verify they pass**
+
+Run: `engine/.venv/bin/python -m pytest engine/tests/test_ipc.py -q`
+
+Expected: all IPC tests pass.
+
+- [ ] **Step 5: Commit the isolated backend change**
+
+```bash
+git add engine/src/autotrader/ipc.py engine/tests/test_ipc.py
+git commit -m "feat: enable factual chat analysis with disclosure"
+```
+
+### Task 2: Decode and display the server disclosure
+
+**Files:**
+- Modify: `app/TradingAgentApp/Models.swift`
+- Modify: `app/TradingAgentApp/EngineClient.swift`
+- Modify: `app/TradingAgentApp/AITradeDeskView.swift`
+- Modify: `app/TradingAgentApp/Tests/TradingAgentAppTests.swift`
+
+- [ ] **Step 1: Write the failing Swift decoding test**
+
+Replace `testChatResponseDecodesAnswer` in `app/TradingAgentApp/Tests/TradingAgentAppTests.swift` with:
+
+```swift
+func testChatResponseDecodesAnswerAndDisclosure() throws {
+    let data = #"{"answer":"Your account has no open positions.","disclaimer":"For informational purposes only — not investment advice. Use your own judgment."}"#.data(using: .utf8)!
+
+    let response = try JSONDecoder().decode(ChatResponse.self, from: data)
+
+    XCTAssertEqual(response.answer, "Your account has no open positions.")
+    XCTAssertEqual(response.disclaimer, "For informational purposes only — not investment advice. Use your own judgment.")
+}
+```
+
+- [ ] **Step 2: Run the focused test and verify it fails**
+
+Run: `cd app/TradingAgentApp && swift test --filter TradingAgentAppTests/testChatResponseDecodesAnswerAndDisclosure`
+
+Expected: compilation failure because `ChatResponse` has no `disclaimer` property.
+
+- [ ] **Step 3: Carry the structured result through the app and render it**
+
+In `Models.swift`, update the model:
+
+```swift
+struct ChatResponse: Codable {
+    let answer: String
+    let disclaimer: String
+}
+```
+
+In `EngineClient.swift`, change `ask(_:)` from `async throws -> String` to `async throws -> ChatResponse` and return the decoded response instead of `.answer`.
+
+In `AITradeDeskView.swift`, extend the assistant message payload and view:
+
+```swift
+private struct ChatMessage: Identifiable {
+    // existing Role declaration
+    let id = UUID()
+    let role: Role
+    let text: String
+    let disclaimer: String?
+}
+```
+
+For user messages set `disclaimer: nil`. In `requestAnswer(for:)`, append the assistant message with `text: response.answer` and `disclaimer: response.disclaimer`. In `messageBubble(_:)`, render `message.disclaimer` below an assistant answer with `.font(.caption2)` and `Color.mutedForeground`. Replace the existing panel footer with the same viewer-discretion language so the boundary remains visible before the first reply.
+
+- [ ] **Step 4: Run the focused test and verify it passes**
+
+Run: `cd app/TradingAgentApp && swift test --filter TradingAgentAppTests/testChatResponseDecodesAnswerAndDisclosure`
+
+Expected: PASS.
+
+- [ ] **Step 5: Commit the isolated Swift chat change**
+
+```bash
+git add app/TradingAgentApp/Models.swift app/TradingAgentApp/EngineClient.swift app/TradingAgentApp/AITradeDeskView.swift app/TradingAgentApp/Tests/TradingAgentAppTests.swift
+git commit -m "feat: show chat informational disclosure"
+```
+
+### Task 3: Add testable nearest-datum selection helpers
+
+**Files:**
+- Modify: `app/TradingAgentApp/Models.swift`
+- Modify: `app/TradingAgentApp/Tests/TradingAgentAppTests.swift`
+
+- [ ] **Step 1: Write failing nearest-datum tests**
+
+Add these tests to `TradingAgentAppTests`:
+
+```swift
+func testNearestBarSelectsTheClosestTimestamp() {
+    let first = Bar(t: "2026-08-28T14:00:00Z", o: 100, h: 102, l: 99, c: 101, v: 1000)
+    let second = Bar(t: "2026-08-28T14:05:00Z", o: 101, h: 103, l: 100, c: 102, v: 1200)
+
+    XCTAssertEqual(nearestBar(to: first.date.addingTimeInterval(230), in: [first, second])?.id, second.id)
+}
+
+func testNearestEquityPointSelectsTheClosestTimestamp() {
+    let first = EquityPoint(t: 1_000, equity: 100_000)
+    let second = EquityPoint(t: 1_300, equity: 100_200)
+
+    XCTAssertEqual(nearestEquityPoint(to: Date(timeIntervalSince1970: 1_250), in: [first, second])?.id, second.id)
+}
+```
+
+- [ ] **Step 2: Run the focused tests and verify they fail**
+
+Run: `cd app/TradingAgentApp && swift test --filter TradingAgentAppTests/testNearest`
+
+Expected: compilation failure because the nearest-datum helpers do not exist.
+
+- [ ] **Step 3: Implement deterministic nearest-datum helpers**
+
+Add these pure functions below `Bar` in `Models.swift`:
+
+```swift
+func nearestBar(to date: Date, in bars: [Bar]) -> Bar? {
+    bars.min { lhs, rhs in
+        abs(lhs.date.timeIntervalSince(date)) < abs(rhs.date.timeIntervalSince(date))
+    }
+}
+
+func nearestEquityPoint(to date: Date, in points: [EquityPoint]) -> EquityPoint? {
+    points.min { lhs, rhs in
+        abs(lhs.date.timeIntervalSince(date)) < abs(rhs.date.timeIntervalSince(date))
+    }
+}
+```
+
+- [ ] **Step 4: Run the focused tests and verify they pass**
+
+Run: `cd app/TradingAgentApp && swift test --filter TradingAgentAppTests/testNearest`
+
+Expected: both nearest-datum tests pass.
+
+- [ ] **Step 5: Commit the isolated model helper change**
+
+```bash
+git add app/TradingAgentApp/Models.swift app/TradingAgentApp/Tests/TradingAgentAppTests.swift
+git commit -m "feat: add chart nearest datum helpers"
+```
+
+### Task 4: Add crosshair and value tooltips to both existing charts
+
+**Files:**
+- Modify: `app/TradingAgentApp/ChartsView.swift`
+- Modify: `app/TradingAgentApp/DashboardView.swift`
+
+- [ ] **Step 1: Implement the stock candle crosshair**
+
+In `ChartsView.swift`, add `@State private var highlightedBar: Bar?` alongside the existing chart view state. Add a small private `candleTooltip(for:)` view that shows the bar date, `O`, `H`, `L`, `C`, and `Vol` in monospaced labels.
+
+```swift
+private func candleTooltip(for bar: Bar) -> some View {
+    VStack(alignment: .leading, spacing: 3) {
+        Text(bar.date, format: .dateTime.month(.abbreviated).day().hour().minute())
+        Text("O \(bar.o, format: .number.precision(.fractionLength(2)))  H \(bar.h, format: .number.precision(.fractionLength(2)))")
+        Text("L \(bar.l, format: .number.precision(.fractionLength(2)))  C \(bar.c, format: .number.precision(.fractionLength(2)))")
+        Text("Vol \(bar.v, format: .number.notation(.compactName))")
+    }
+    .font(.caption2.monospacedDigit())
+    .foregroundStyle(Color.foreground)
+    .padding(8)
+    .background(Color.background)
+    .clipShape(RoundedRectangle(cornerRadius: SRadius.sm, style: .continuous))
+    .overlay(RoundedRectangle(cornerRadius: SRadius.sm, style: .continuous).stroke(Color.border, lineWidth: 1))
+}
+```
+
+Inside the existing `Chart` in `candleChart(for:)`, append this conditional mark after the `ForEach`:
+
+```swift
+if let highlightedBar {
+    RuleMark(x: .value("Selected time", highlightedBar.date))
+        .foregroundStyle(Color.accentColor)
+        .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+        .annotation(position: .top) {
+            candleTooltip(for: highlightedBar)
+        }
+}
+```
+
+Attach this overlay to the same chart, using its local plot-area x coordinate and the pure helper from Task 3:
+
+```swift
+.chartOverlay { proxy in
+    GeometryReader { geometry in
+        Rectangle()
+            .fill(.clear)
+            .contentShape(Rectangle())
+            .onContinuousHover { phase in
+                switch phase {
+                case .active(let location):
+                    let plotFrame = geometry[proxy.plotAreaFrame]
+                    guard let date = proxy.value(atX: location.x - plotFrame.origin.x, as: Date.self) else { return }
+                    highlightedBar = nearestBar(to: date, in: bars)
+                case .ended:
+                    highlightedBar = nil
+                }
+            }
+    }
+}
+```
+
+Reset `highlightedBar` to `nil` whenever a new ticker or range starts loading, so a stale tooltip cannot be paired with a new data series. Preserve existing scrollable axes, zoom, range controls, and accessible OHLC summary.
+
+- [ ] **Step 2: Implement the dashboard P&L crosshair**
+
+In `DashboardView.swift`, add `@State private var highlightedEquityPoint: EquityPoint?`. Add this tooltip view:
+
+```swift
+private func pnlTooltip(for point: EquityPoint, dayStart: Double) -> some View {
+    VStack(alignment: .leading, spacing: 3) {
+        Text(point.date, format: .dateTime.hour().minute())
+        Text("Equity \(point.equity, format: .currency(code: \"USD\"))")
+        Text("P&L \(point.equity - dayStart, format: .currency(code: \"USD\").sign(strategy: .always()))")
+    }
+    .font(.caption2.monospacedDigit())
+    .foregroundStyle(Color.foreground)
+    .padding(8)
+    .background(Color.background)
+    .clipShape(RoundedRectangle(cornerRadius: SRadius.sm, style: .continuous))
+    .overlay(RoundedRectangle(cornerRadius: SRadius.sm, style: .continuous).stroke(Color.border, lineWidth: 1))
+}
+```
+
+In the existing P&L chart, conditionally add a `RuleMark` at `highlightedEquityPoint.date`, using `.annotation(position: .top) { pnlTooltip(for: highlightedEquityPoint, dayStart: dayStart) }`.
+
+Attach the same `chartOverlay` interaction, substituting:
+
+```swift
+highlightedEquityPoint = nearestEquityPoint(to: date, in: history)
+```
+
+Clear the highlight when hover ends. Keep the zero reference rule and existing axes unchanged.
+
+- [ ] **Step 3: Run the app test suite and build**
+
+Run:
+
+```bash
+cd app/TradingAgentApp && swift test
+cd app && bash build-app.sh
+```
+
+Expected: the test suite passes and the app build exits with status `0`.
+
+- [ ] **Step 4: Perform manual pointer verification**
+
+Launch the rebuilt app against the local API. In Charts, select one intraday range and one daily/long-range dataset, move the pointer across several candles, and confirm each tooltip follows the nearest candle and reports the matching O/H/L/C/volume. On Dashboard, move across the P&L line and confirm the time, equity, and P&L agree with the plotted point. Confirm range switching and scroll/zoom still work after a tooltip is dismissed.
+
+- [ ] **Step 5: Commit the isolated chart UI change**
+
+```bash
+git add app/TradingAgentApp/ChartsView.swift app/TradingAgentApp/DashboardView.swift app/TradingAgentApp/Tests/TradingAgentAppTests.swift
+git commit -m "feat: add chart hover crosshairs"
+```
+
+### Task 5: Full verification and review
+
+**Files:**
+- Verify only: all changed files and `docs/specs/ai-agent-analysis-and-chart-crosshair.md`
+
+- [ ] **Step 1: Run the complete engine suite**
+
+Run: `engine/.venv/bin/python -m pytest engine/tests -q`
+
+Expected: every test passes.
+
+- [ ] **Step 2: Inspect the implementation against the approved spec**
+
+Run:
+
+```bash
+git diff origin/main...HEAD --check
+git diff origin/main...HEAD -- docs/specs/ai-agent-analysis-and-chart-crosshair.md engine/src/autotrader/ipc.py engine/tests/test_ipc.py app/TradingAgentApp/Models.swift app/TradingAgentApp/EngineClient.swift app/TradingAgentApp/AITradeDeskView.swift app/TradingAgentApp/ChartsView.swift app/TradingAgentApp/DashboardView.swift app/TradingAgentApp/Tests/TradingAgentAppTests.swift
+```
+
+Expected: no whitespace errors, every done criterion is represented, and no scope item adds chat order execution or personalized advice.
+
+- [ ] **Step 3: Obtain independent code review**
+
+Ask a review-only subagent to compare the diff with `docs/specs/ai-agent-analysis-and-chart-crosshair.md`, specifically checking response compatibility, unsafe-output handling, tooltip coordinate conversion, hover dismissal, and range-switch/reset behavior. Address only confirmed findings with tests before opening a PR.
