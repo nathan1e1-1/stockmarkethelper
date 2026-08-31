@@ -89,7 +89,7 @@ final class EngineClient: ObservableObject {
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
             guard isSuccessful(response) else {
-                throw EngineClientError.message(serverErrorMessage(from: data))
+                throw EngineClientError.message(Self.serverErrorMessage(from: data))
             }
             return try JSONDecoder().decode(ChatResponse.self, from: data).answer
         } catch let error as EngineClientError {
@@ -106,11 +106,24 @@ final class EngineClient: ObservableObject {
         return (200..<300).contains(response.statusCode)
     }
 
-    private func serverErrorMessage(from data: Data) -> String {
+    nonisolated static func serverErrorMessage(from data: Data) -> String {
         if let response = try? JSONDecoder().decode(ServerErrorResponse.self, from: data),
            !response.detail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return response.detail
         }
+
+        guard let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let detail = payload["detail"] else {
+            return "The assistant is temporarily unavailable. Please try again shortly."
+        }
+
+        if let validationErrors = detail as? [Any], !validationErrors.isEmpty {
+            return "Enter a question between 1 and 2,000 characters."
+        }
+        if let validationError = detail as? [String: Any], !validationError.isEmpty {
+            return "Enter a question between 1 and 2,000 characters."
+        }
+
         return "The assistant is temporarily unavailable. Please try again shortly."
     }
 }

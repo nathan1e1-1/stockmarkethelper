@@ -22,4 +22,12 @@ final class TradingAgentAppTests: XCTestCase {
 
         XCTAssertEqual(try JSONDecoder().decode(ChatResponse.self, from: data).answer, "Your account has no open positions.")
     }
+
+    func testChatValidationDetailsProduceActionableQuestionMessage() {
+        let arrayDetail = #"{"detail":[{"type":"string_too_short","loc":["body","question"],"msg":"String should have at least 1 character"}]}"#.data(using: .utf8)!
+        let objectDetail = #"{"detail":{"type":"string_too_short","loc":["body","question"],"msg":"String should have at least 1 character"}}"#.data(using: .utf8)!
+
+        XCTAssertEqual(EngineClient.serverErrorMessage(from: arrayDetail), "Enter a question between 1 and 2,000 characters.")
+        XCTAssertEqual(EngineClient.serverErrorMessage(from: objectDetail), "Enter a question between 1 and 2,000 characters.")
+    }
 }
