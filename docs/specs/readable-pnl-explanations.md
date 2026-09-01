@@ -3,10 +3,10 @@
 ## Goal
 
 Turn a P&L question into a concise, plain-English factual explanation. The
-answer must show what the account data can attribute, include relevant verified
-market-news context, and explicitly identify any part of the account-level
-change that the engine cannot attribute. It must never present a news item as
-the proven cause of a price move or give trading advice.
+answer must show what the account data can attribute and explicitly identify
+any part of the account-level change that the engine cannot attribute. Market
+news is not shown in AI responses for this release, and the answer never gives
+trading advice.
 
 ## Done looks like
 
@@ -26,11 +26,7 @@ the proven cause of a price move or give trading advice.
   has access to ticker, quantity, entry price, exit price, realized P&L, exit
   reason, and recorded close time. It summarizes the largest gains and losses
   first and retains the remaining records in the details section.
-- For account-relevant tickers (open positions and current-day recorded
-  trades), the engine retrieves a bounded set of verified Alpaca news records.
-  Each displayed item has a headline plus available publication time and
-  source. News is presented as related context, never as a claimed explanation
-  of the security's move.
+- Market-news context is not shown in AI responses for this release.
 - Missing prices, bars, news, or trade records do not fail the chat response.
   The response says what is unavailable and omits that individual detail.
 - The existing informational disclosure remains below every response. Chat
@@ -52,10 +48,7 @@ plain English from verified data in this order:
    unrealized_pnl`, reported only when materially non-zero. The text states
    that the current ledger does not attribute this amount, without guessing at
    fees, previous activity, deposits, or other causes.
-4. **Relevant market-news context** — dated, sourced headlines/summaries for
-   the relevant ticker, with language such as “Related verified news context”
-   and “the available data does not establish causation.”
-5. **Price and trade details** — compact factual records for the remaining
+4. **Price and trade details** — compact factual records for the remaining
    available account positions and recorded current-day trades.
 
 The selector prompt is narrowed so P&L-driver questions choose
