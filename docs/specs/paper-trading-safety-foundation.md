@@ -31,8 +31,9 @@ provide investment advice.
   the rest of the session and follows the same exit/reconciliation path. It
   cannot repurchase a symbol after flattening it.
 - Missing, invalid, or stale-enough-to-be-unsafe account, order, position, or
-  quote data blocks new entries. A nonterminal or unknown sell continues to be
-  tracked; it is not recorded as a closed trade or removed from local state.
+  quote data blocks new entries. Only the unfilled portion of a nonterminal or
+  unknown sell continues to be tracked; a broker-confirmed filled slice is
+  recorded separately and removed from the open position.
 - All of the above are verified with deterministic fakes before production
   code is added. The existing test suite and app build remain green.
 
@@ -44,10 +45,14 @@ provide investment advice.
 | Initial exposure | One open-or-pending position; one entry per session; 0.25% per position and 0.25% gross exposure. |
 | Scaling | Never automatic. A human changes the named paper profile only after the evidence gate below. |
 | Limit accounting | Open broker positions plus submitted-but-not-terminal orders and in-process reservations. |
+| Session-entry counting | A broker-acknowledged buy consumes one session entry permanently; rejection, cancellation, or expiry does not restore it. |
+| Entry-price bound | An entry is a day limit buy at or below the reserved limit price; the reservation notional is that limit price times quantity. |
 | Circuit breaker | Durable, latching `ACTIVE → HALTING → HALTED`; manual re-arm only after a successful broker reconciliation. |
 | Cutoff | No new entries at or after `flatten_time`; positions are exited and pending entries cancelled. |
 | Order truth | Submission is acknowledgement, not a fill. Broker terminal state and fill fields determine local state and P&L. |
 | Failure posture | Fail closed for entries; preserve/continue reconciling uncertain exits. |
+| Freshness | Entry quotes, account snapshots, position snapshots, and order snapshots must carry source/observation timestamps and be no more than 120 seconds old. |
+| Persistence | A reservation or lifecycle intent is atomically durable before its broker request; persistence failure blocks every new entry. |
 | Strategy policy | Unchanged in this feature. No entry-score, model-prompt, news, recommendation, or profit-target changes. |
 
 ## Scope
@@ -64,6 +69,13 @@ boundary testable.
 The initial values above are defaults for the `initial` paper profile. They are
 configuration, not an adaptive sizing algorithm.
 
+`max_snapshot_age_seconds` defaults to 120. `AlpacaProvider` returns a
+timestamped `Quote` rather than a bare price for entry and exit decisions:
+`symbol`, positive `price`, broker `source_timestamp`, and local
+`observed_at`. Executor account, position, and order reads similarly carry an
+`observed_at` timestamp. Entry admission rejects any missing timestamp or any
+snapshot older than the configured age relative to the injected clock.
+
 ### 2. Atomic admission and reservation ledger
 
 `RiskManager` becomes the single admission authority. Its operation accepts a
@@ -75,10 +87,16 @@ machine-readable rejection reason. It checks, in one operation:
 - no duplicate symbol exists in an open, pending, or reserved state;
 - the position, gross-exposure, and session-entry caps will still hold.
 
-The runner creates a reservation before it requests a buy. It attaches the
-broker order ID after acknowledgement, then reconciles that order on later
-cycles. Reservation release and fill conversion are idempotent, so retries or
-restarts cannot create an extra slot or exposure.
+The runner calculates quantity from a limit price no higher than the current
+valid quote, then creates a reservation for `quantity × limit_price` with a
+deterministic client order ID. It atomically persists that intent before the
+broker call and submits a day limit buy at that same price. The broker
+acknowledgement consumes the session-entry count permanently and binds the
+broker order ID; neither a rejection nor cancellation replenishes the budget.
+The runner then reconciles the order on later cycles. Because a buy fill cannot
+exceed its limit price, a confirmed fill cannot exceed reserved notional.
+Reservation release and fill conversion are idempotent, so retries or restarts
+cannot create an extra slot or exposure.
 
 ### 3. Durable safety state and session cutoff
 
@@ -87,6 +105,19 @@ pending-order/reservation records, and the session cutoff marker. Existing
 legacy state files load into the safest compatible defaults: no unknown pending
 entry is accepted as filled, and unknown risk state is `HALTED` until broker
 reconciliation succeeds.
+
+Every critical state write uses a temporary file, file-system flush, atomic
+replace, and parent-directory flush; the store reports success or failure to
+its caller rather than only logging a warning. A failed pre-submit write
+prevents the broker request. If a write
+after a broker request fails, the runner retains the already-persisted client
+order intent, enters in-memory `HALTED`, makes no further entry requests, and
+terminates scanning. On restart, it begins `HALTED` and reconciles that client
+order ID before any re-arm. Exit IDs are a deterministic function of session,
+symbol, and exit reason, so the executor can submit and later look up that
+single exit even if writing its intent failed. It then halts scanning; restart
+reconciles both that deterministic ID and the broker position before any
+re-arm. An exit write failure never permits a new entry.
 
 On hard-stop or daily-stop breach, the main loop asks the risk manager to
 transition to `HALTING`. The executor first cancels pending entry orders, then
@@ -102,14 +133,20 @@ an order lookup fails.
 ### 4. Broker-confirmed lifecycle and close accounting
 
 The executor exposes a small order lifecycle interface: submit, fetch status,
-and cancel. It maps broker status, filled quantity, and average fill price into
-the local `Order` model without inventing values from a quote.
+and cancel. It maps broker status, cumulative filled quantity, and cumulative
+filled notional/average fill price into the local `Order` model without
+inventing values from a quote. Each pending order persists the last processed
+cumulative quantity and notional. Reconciliation applies only the monotonic
+filled delta; a missing or decreasing cumulative value halts entries for
+manual reconciliation.
 
-The runner records a `ClosedTrade` only for a confirmed terminal sell fill. It
-uses actual filled quantity and average fill price. Rejected, cancelled,
-pending, and partially filled sells stay in the pending lifecycle and preserve
-the remaining broker position. Quote-based stop and take-profit decisions may
-request an exit but may not mark the exit complete.
+Every broker-confirmed sell fill creates a `ClosedTrade` fill slice immediately
+with its actual filled quantity and average fill price, and reduces the open
+position by that same quantity. A terminal cancelled or rejected remainder
+stays as the remaining broker position; it cannot erase a previously confirmed
+fill. Pending/unknown portions remain in the lifecycle until reconciled.
+Quote-based stop and take-profit decisions may request an exit but may not
+mark an unfilled quantity complete.
 
 ## Paper-evidence promotion gate
 
@@ -122,11 +159,13 @@ following for the completed paper sample:
   no unresolved order or position;
 - no exposure-cap, cutoff, paper-mode, or latching-halt invariant failed;
 - at least 12 of the 20 sessions finish with a positive net paper result;
-- a positive aggregate paper result after the configured transaction-cost and
+- a positive aggregate paper result after the predeclared transaction-cost and
   slippage assumptions; and
 - no manual re-arm while an order or position was unresolved.
 
-This gate authorizes consideration of a configuration review only. It does not
+This gate authorizes consideration of a configuration review only. The
+transaction-cost and slippage assumptions are predeclared in that operator
+evidence record; they are not a new engine model in this feature. The gate does not
 guarantee future profitability, automatically edit configuration, or enable
 live trading. Historical replay and richer performance evaluation remain a
 later feature.
@@ -158,8 +197,12 @@ unblocks the next paper session only; it never changes the selected profile.
 - Broker timeout after submit: retain the reservation as unknown-pending; do
   not resubmit or release it until status reconciliation resolves it.
 - Partial buy: count filled exposure plus the remaining pending exposure.
-- Partial sell: record no closed trade until the remaining position reaches a
-  terminal filled state; never report quote-based P&L as realized.
+- Partial sell: record each broker-confirmed filled slice at its actual price,
+  keep any unfilled/cancelled remainder open, and never report quote-based P&L
+  as realized.
+- A persistence failure before an entry request sends no order. A failure after
+  acknowledgement leaves the durable client order intent intact and stops all
+  further entries until restart reconciliation.
 - Repeated cancel/exit calls are idempotent by broker order ID and state.
 - A restart with nonterminal orders remains `HALTED` or `HALTING` until the
   broker snapshot resolves them.
@@ -172,15 +215,18 @@ plan must name exact test files and commands, including:
 - paper-only config rejection and initial-profile validation;
 - same-scan multi-buy attempts proving reservations enforce every cap;
 - duplicate, zero-quantity, invalid-price, and stale/unavailable data
-  rejections;
-- reservation release, partial fill, rejection, cancellation, timeout, and
-  restart recovery;
+  rejections, including the exact 120-second freshness boundary;
+- reservation release, permanent session-entry consumption after broker
+  acknowledgement, partial fill, rejection, cancellation, timeout, and restart
+  recovery;
 - hard-stop and daily-stop transitions, pending-buy cancellation, durable halt,
   and re-arm preconditions;
 - flatten-time entry lockout, including a failed flatten attempt followed by a
   scan;
-- terminal fill, partial fill, rejection, and pending sell handling with
-  actual-fill P&L only;
+- terminal fill, partial fill followed by cancellation, rejection, and pending
+  sell handling with actual-fill P&L only;
+- atomic-state-write success and failure before submission, after broker
+  acknowledgement, and during exit handling;
 - full engine test suite, application build, and diff whitespace check.
 
 ## Out of scope
