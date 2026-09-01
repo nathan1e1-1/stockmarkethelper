@@ -423,6 +423,242 @@ def test_chat_endpoint_renders_selected_factual_topics_and_never_returns_model_p
     assert "Answer the user's question" not in llm.prompt
 
 
+def test_chat_endpoint_renders_readable_pnl_explanation_without_raw_pnl_or_decision_log():
+    class FakeLLM:
+        def __init__(self):
+            self.prompt = ""
+
+        def complete(self, prompt):
+            self.prompt = prompt
+            return '{"topics": ["pnl_explanation", "pnl", "decisions"]}'
+
+    state = SharedState()
+    state.pnl_attribution = {
+        "daily_pnl": -1_050.0,
+        "daily_pnl_pct": -1.05,
+        "realized_pnl": -400.0,
+        "unrealized_pnl": -600.0,
+        "reconciliation_pnl": -50.0,
+        "open_positions": [
+            {
+                "ticker": "AAPL",
+                "qty": 3,
+                "avg_entry_price": 190.0,
+                "current_price": 185.0,
+                "unrealized_pnl": -15.0,
+                "unrealized_pnl_pct": -2.6315789,
+                "day_open": 187.5,
+                "day_close": 185.0,
+                "day_change": -2.5,
+                "day_change_pct": -1.3333333,
+            },
+            {
+                "ticker": "MSFT",
+                "qty": 2,
+                "avg_entry_price": 100.0,
+                "current_price": 110.0,
+                "unrealized_pnl": 20.0,
+                "unrealized_pnl_pct": 10.0,
+                "day_open": 108.0,
+                "day_close": 110.0,
+                "day_change": 2.0,
+                "day_change_pct": 1.8518519,
+            },
+        ],
+        "realized_trades": [
+            {
+                "ticker": "TSLA",
+                "qty": 2,
+                "entry_price": 250.0,
+                "exit_price": 248.0,
+                "realized_pnl": -400.0,
+                "exit_reason": "manual close",
+                "closed_at": "2026-08-31T14:30:00+00:00",
+            }
+        ],
+        "news_by_ticker": {
+            "AAPL": [
+                {
+                    "headline": "Apple shares decline after product update",
+                    "summary": "The company will hold its annual meeting on September 1.",
+                    "created_at": "2026-08-31T13:00:00+00:00",
+                    "source": "Associated Press",
+                }
+            ],
+            "MSFT": [
+                {
+                    "headline": "Microsoft rises on cloud demand",
+                    "summary": "",
+                    "created_at": "2026-08-31T12:00:00+00:00",
+                    "source": "Reuters",
+                }
+            ],
+        },
+    }
+    state.decisions = [
+        AgentDecision(
+            ticker="AAPL",
+            decision=Decision.BUY,
+            rationale="unrelated engine record",
+            confidence=0.4,
+            timestamp=datetime(2026, 8, 31, 14, 30, tzinfo=timezone.utc),
+        )
+    ]
+
+    llm = FakeLLM()
+    response = TestClient(create_app(state, llm=llm)).post(
+        "/api/chat", json={"question": "What drove today's P&L?"}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["disclaimer"] == _INFORMATIONAL_DISCLAIMER
+    assert "Today's P&L is -$1,050.00 (-1.05%)." in body["answer"]
+    assert "Realized P&L: -$400.00; unrealized P&L: -$600.00." in body["answer"]
+    assert "Largest negative contributor: TSLA realized trade -$400.00" in body["answer"]
+    assert "Largest positive contributor: MSFT unrealized P&L $20.00" in body["answer"]
+    assert "AAPL position: 3 shares, entry $190.00, current $185.00, unrealized -$15.00 (-2.63%);" in body["answer"]
+    assert "one-day move -$2.50 (-1.33%), from $187.50 open to $185.00 close." in body["answer"]
+    assert "Reconciliation: daily P&L minus realized and unrealized P&L is -$50.00." in body["answer"]
+    assert "The current ledger does not attribute this amount." in body["answer"]
+    assert "news" not in body["answer"].lower()
+    assert "Associated Press" not in body["answer"]
+    assert "Reuters" not in body["answer"]
+    assert "Apple shares decline after product update" not in body["answer"]
+    assert "The company will hold its annual meeting on September 1." not in body["answer"]
+    assert "Microsoft rises on cloud demand" not in body["answer"]
+    assert "manual close" not in body["answer"]
+    assert "A recorded exit for TSLA contributed -$400.00 realized P&L." in body["answer"]
+    assert "Engine decision log" not in body["answer"]
+    assert "Daily P&L is" not in body["answer"]
+    assert "pnl_explanation" in llm.prompt
+    assert "P&L-driver questions" in llm.prompt
+    assert body["answer"].index("Largest negative contributor:") < body["answer"].index("Reconciliation:")
+    assert body["answer"].index("Reconciliation:") < body["answer"].index("A recorded exit for TSLA")
+
+
+@pytest.mark.parametrize(
+    "unsafe_text",
+    [
+        "Buy AAPL now",
+        "Sell AAPL now",
+        "Hold until the target price is reached",
+        "Buy 10 AAPL shares",
+        "Sell 5 AAPL shares",
+        "Hold 100 AAPL shares",
+        "Target-price $250",
+        "Predicted gain of 10%",
+        "Projected gain of 10%",
+        "Expect AAPL to rise",
+        "May rise 10%",
+        "Acquire AAPL now",
+        "Liquidate this position",
+        "Cover the short position",
+        "Open a new position",
+        "Close-position now",
+        "Set a stop_loss at $100",
+        "Hedge your AAPL exposure",
+        "Rebalance your portfolio",
+        "Use position sizing of 2%",
+        "Set a take-profit at $200",
+        "Set a stop loss at $100",
+        "Consider buying AAPL",
+        "You should sell AAPL",
+        "This will double your money",
+    ],
+)
+def test_chat_endpoint_omits_actionable_external_snapshot_text_from_pnl_explanation(unsafe_text):
+    class FakeLLM:
+        def complete(self, prompt):
+            return '{"topics": ["pnl_explanation"]}'
+
+    state = SharedState()
+    state.pnl_attribution = {
+        "daily_pnl": -100.0,
+        "daily_pnl_pct": -0.1,
+        "realized_pnl": -100.0,
+        "unrealized_pnl": 0.0,
+        "reconciliation_pnl": 0.0,
+        "open_positions": [
+            {
+                "ticker": "AAPL",
+                "qty": 1,
+                "avg_entry_price": 190.0,
+                "current_price": 190.0,
+                "unrealized_pnl": 0.0,
+                "unrealized_pnl_pct": 0.0,
+                "day_open": 190.0,
+                "day_close": 190.0,
+                "day_change": 0.0,
+                "day_change_pct": 0.0,
+            }
+        ],
+        "realized_trades": [
+            {
+                "ticker": "TSLA",
+                "qty": 1,
+                "entry_price": 250.0,
+                "exit_price": 249.0,
+                "realized_pnl": -100.0,
+                "exit_reason": unsafe_text,
+                "closed_at": "2026-08-31T14:30:00+00:00",
+            }
+        ],
+        "news_by_ticker": {
+            "AAPL": [
+                {
+                    "headline": unsafe_text,
+                    "summary": unsafe_text,
+                    "created_at": "2026-08-31T13:00:00+00:00",
+                    "source": unsafe_text,
+                }
+            ]
+        },
+    }
+
+    response = TestClient(create_app(state, llm=FakeLLM())).post(
+        "/api/chat", json={"question": "Explain today's P&L."}
+    )
+
+    assert response.status_code == 200
+    answer = response.json()["answer"]
+    assert "A recorded exit for TSLA contributed -$100.00 realized P&L." in answer
+    assert "AAPL position: 1 share, entry $190.00, current $190.00" in answer
+    assert "news" not in answer.lower()
+    assert unsafe_text not in answer
+
+
+def test_chat_endpoint_renders_pnl_explanation_when_snapshot_has_no_contributors_or_news():
+    class FakeLLM:
+        def complete(self, prompt):
+            return '{"topics": ["pnl", "pnl_explanation", "decisions"]}'
+
+    state = SharedState()
+    state.pnl_attribution = {
+        "daily_pnl": 0.0,
+        "daily_pnl_pct": 0.0,
+        "realized_pnl": 0.0,
+        "unrealized_pnl": 0.0,
+        "reconciliation_pnl": 0.009,
+        "open_positions": [],
+        "realized_trades": [],
+        "news_by_ticker": {},
+    }
+
+    response = TestClient(create_app(state, llm=FakeLLM())).post(
+        "/api/chat", json={"question": "Explain today's P&L."}
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "answer": (
+            "Today's P&L is $0.00 (0.00%). Realized P&L: $0.00; unrealized P&L: $0.00. "
+            "No realized or open-position contributors are recorded in this snapshot."
+        ),
+        "disclaimer": _INFORMATIONAL_DISCLAIMER,
+    }
+
+
 def test_chat_endpoint_renders_account_currency_day_start_and_current_equity():
     class FakeLLM:
         def complete(self, prompt):

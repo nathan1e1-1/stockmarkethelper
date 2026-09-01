@@ -8,16 +8,42 @@ import uvicorn
 from autotrader.agent import OllamaAgent
 from autotrader.config import load_config
 from autotrader.execution import AlpacaExecutor
+from autotrader.history import HistoryRange
 from autotrader.ipc import SharedState, create_app
 from autotrader.market import EASTERN, is_after_close, is_market_open
 from autotrader.models import Equity
-from autotrader.pnl import build_pnl_snapshot
+from autotrader.pnl import build_pnl_snapshot, enrich_pnl_snapshot
 from autotrader.providers.alpaca import AlpacaProvider
 from autotrader.risk import RiskManager
 from autotrader.runner import Runner
 from autotrader.state import State, StateStore, same_day
 from autotrader.summary import daily_summary
 from autotrader.universe import build_universe
+
+
+def _pnl_tickers(snapshot: dict) -> list[str]:
+    tickers = [record["ticker"] for record in snapshot.get("open_positions", [])]
+    tickers.extend(record["ticker"] for record in snapshot.get("realized_trades", []))
+    return list(dict.fromkeys(ticker for ticker in tickers if isinstance(ticker, str) and ticker))
+
+
+def _pnl_context(
+    provider,
+    bar_tickers: list[str],
+    news_tickers: list[str],
+) -> tuple[dict[str, list[dict]], dict[str, list[dict]]]:
+    bars_by_ticker, news_by_ticker = {}, {}
+    for ticker in bar_tickers:
+        try:
+            bars_by_ticker[ticker] = provider.bars(ticker, history_range=HistoryRange.ONE_DAY)
+        except Exception:
+            bars_by_ticker[ticker] = []
+    for ticker in news_tickers:
+        try:
+            news_by_ticker[ticker] = provider.news(ticker, limit=2)
+        except Exception:
+            news_by_ticker[ticker] = []
+    return bars_by_ticker, news_by_ticker
 
 
 def publish_pnl_attribution(shared, provider, equity, positions, closed_trades) -> None:
@@ -28,7 +54,10 @@ def publish_pnl_attribution(shared, provider, equity, positions, closed_trades) 
         except Exception as error:
             print(f"[warn] latest price unavailable for {position.ticker}: {error}")
             prices[position.ticker] = None
-    shared.pnl_attribution = build_pnl_snapshot(equity, positions, prices, closed_trades)
+    snapshot = build_pnl_snapshot(equity, positions, prices, closed_trades)
+    open_tickers = list(dict.fromkeys(record["ticker"] for record in snapshot.get("open_positions", [])))
+    bars_by_ticker, news_by_ticker = _pnl_context(provider, open_tickers, _pnl_tickers(snapshot))
+    shared.pnl_attribution = enrich_pnl_snapshot(snapshot, bars_by_ticker, news_by_ticker)
 
 
 def restore_same_day_state(loaded: State, day: str, runner, risk) -> bool:

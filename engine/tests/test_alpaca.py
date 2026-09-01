@@ -56,7 +56,9 @@ def test_fixture_provider_news():
     p = FixtureProvider()
     news = p.news("AAPL", limit=5)
     assert len(news) == 5
-    assert all("headline" in n for n in news)
+    assert all(set(n) == {"headline", "summary", "created_at", "source"} for n in news)
+    assert all(n["created_at"] == "2026-08-30T00:00:00+00:00" for n in news)
+    assert all(n["source"] == "FixtureProvider" for n in news)
 
 
 class FakeAsset:
@@ -96,10 +98,29 @@ class FakeDataClient:
         return {"AAPL": self.bars}
 
 
-def provider_with(data=None, trading=None):
+class FakeNewsArticle:
+    def __init__(self, headline, summary, created_at, source):
+        self.headline = headline
+        self.summary = summary
+        self.created_at = created_at
+        self.source = source
+
+
+class FakeNewsClient:
+    def __init__(self, news):
+        self.news = news
+        self.requests = []
+
+    def get_news(self, request):
+        self.requests.append(request)
+        return type("FakeNewsResponse", (), {"data": {"news": self.news}})()
+
+
+def provider_with(data=None, trading=None, news=None):
     provider = object.__new__(AlpacaProvider)
     provider._data = data
     provider._trading = trading
+    provider._news = news
     provider._asset_search_cache = None
     return provider
 
@@ -194,3 +215,75 @@ def test_scan_bars_builds_the_legacy_seven_day_one_minute_fifty_bar_request():
     assert request.timeframe.unit is TimeFrameUnit.Minute
     assert request.limit == 50
     assert timedelta(days=7) <= request.end - request.start <= timedelta(days=7, seconds=1)
+
+
+def test_news_normalizes_created_at_and_source():
+    created_at = datetime(2026, 8, 30, 15, 45, tzinfo=timezone.utc)
+    news = [
+        FakeNewsArticle(
+            "AAPL launches new product",
+            "Apple announced a new product line.",
+            created_at,
+            "Reuters",
+        )
+    ]
+    provider = provider_with(news=FakeNewsClient(news))
+
+    result = provider.news("AAPL", limit=1)
+
+    assert result == [
+        {
+            "headline": "AAPL launches new product",
+            "summary": "Apple announced a new product line.",
+            "created_at": "2026-08-30T15:45:00+00:00",
+            "source": "Reuters",
+        }
+    ]
+
+
+def test_news_maps_blank_source_and_non_datetime_created_at_to_none():
+    news = [
+        FakeNewsArticle(
+            "AAPL launches new product",
+            "Apple announced a new product line.",
+            "not-a-datetime",
+            "   ",
+        )
+    ]
+    provider = provider_with(news=FakeNewsClient(news))
+
+    result = provider.news("AAPL", limit=1)
+
+    assert result == [
+        {
+            "headline": "AAPL launches new product",
+            "summary": "Apple announced a new product line.",
+            "created_at": None,
+            "source": None,
+        }
+    ]
+
+
+def test_news_excludes_blank_headlines_and_strips_summary():
+    news = [
+        FakeNewsArticle(None, "  skip me  ", datetime(2026, 8, 30, tzinfo=timezone.utc), "Reuters"),
+        FakeNewsArticle("   ", "  skip me too  ", datetime(2026, 8, 30, tzinfo=timezone.utc), "Reuters"),
+        FakeNewsArticle(
+            "AAPL launches new product",
+            "  Apple announced a new product line.  ",
+            datetime(2026, 8, 30, 15, 45, tzinfo=timezone.utc),
+            "Reuters",
+        ),
+    ]
+    provider = provider_with(news=FakeNewsClient(news))
+
+    result = provider.news("AAPL", limit=3)
+
+    assert result == [
+        {
+            "headline": "AAPL launches new product",
+            "summary": "Apple announced a new product line.",
+            "created_at": "2026-08-30T15:45:00+00:00",
+            "source": "Reuters",
+        }
+    ]

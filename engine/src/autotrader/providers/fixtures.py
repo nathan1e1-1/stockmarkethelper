@@ -82,7 +82,12 @@ class FixtureProvider:
 
     def news(self, ticker: str, limit: int = 5) -> list[dict]:
         return [
-            {"headline": f"{ticker} beats earnings expectations", "sentiment_hint": "positive"}
+            {
+                "headline": f"{ticker} beats earnings expectations",
+                "summary": None,
+                "created_at": datetime(2026, 8, 30, tzinfo=timezone.utc).isoformat(),
+                "source": "FixtureProvider",
+            }
             for _ in range(limit)
         ]
 

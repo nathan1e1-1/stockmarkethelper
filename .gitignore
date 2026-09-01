@@ -58,6 +58,7 @@ pnpm-lock.yaml
 
 # --- Superpowers brainstorming artifacts ---
 .superpowers/
+.worktrees/
 
 # runtime journal
 state/
