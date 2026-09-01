@@ -625,3 +625,101 @@ server-created decision records contain BUY/SELL/HOLD wording.
 git add engine/src/autotrader/ipc.py engine/tests/test_ipc.py
 git commit -m "fix: render verified historical decisions"
 ```
+
+### Revision: deterministic server-rendered chat commentary
+
+Model prose cannot be made safe with a blacklist. The model becomes a bounded
+topic selector only: it returns JSON containing zero or more values from
+`account`, `pnl`, `positions`, `risk`, and `decisions`. The server validates
+that selection and produces every visible sentence from current factual state.
+No model-authored content is returned to the client.
+
+### Task 9: Render factual chat responses from validated topics
+
+**Files:**
+- Modify: `engine/src/autotrader/ipc.py`
+- Modify: `engine/tests/test_ipc.py`
+
+- [ ] **Step 1: Write failing deterministic-response tests**
+
+Add a fake LLM that returns `{"topics": ["pnl", "decisions"]}`. With an
+equity record, P&L attribution, and one timestamped AAPL BUY decision, assert
+the `/api/chat` answer contains only server-rendered daily P&L facts and the
+exact server decision record; assert it does not contain arbitrary LLM text.
+
+Add tests showing these model outputs never appear in the response and instead
+return either safe selected facts or the safe limitation:
+
+```python
+"Short AAPL now."
+"Set a trailing stop."
+"The engine action was to reduce AAPL exposure."
+```
+
+Add validation tests: an unknown selected topic is ignored, a JSON object with
+no valid topics yields the safe limitation, malformed non-JSON model output
+raises the existing 503 assistant-unavailable error, and a valid `positions`
+selection renders only current ticker/quantity/average-entry data. Preserve the
+disclaimer on all successful responses.
+
+- [ ] **Step 2: Run the focused tests and verify the free-form path fails**
+
+Run: `PYTHONPATH=engine/src /Users/nthnp/Developer/stockmarkethelper/engine/.venv/bin/python -m pytest engine/tests/test_ipc.py -q`
+
+Expected: tests fail because the endpoint currently exposes LLM prose and does
+not parse topic JSON.
+
+- [ ] **Step 3: Implement topic validation and server renderers**
+
+Define `_ALLOWED_CHAT_TOPICS = frozenset({"account", "pnl", "positions",
+"risk", "decisions"})`. Add `_selected_chat_topics(raw)` that calls
+`json.loads`, accepts only a mapping with a list-valued `topics`, and returns
+the ordered de-duplicated intersection with `_ALLOWED_CHAT_TOPICS`; invalid JSON
+raises `ValueError`.
+
+Add `_render_chat_topics(state, topics)` that returns only template-generated
+sentences from `_chat_context(state)`: currency equity/day-start facts for
+`account`, daily/realized/unrealized P&L only when values exist for `pnl`, open
+position ticker/quantity/average-entry facts for `positions`, factual
+kill-switch/daily-stop state for `risk`, and `_recorded_decision_sentences` for
+`decisions`. It must not render a risk-control action record because there is
+no recorded risk-control-event source.
+
+Replace the free-form output use in `/api/chat`: prompt the model to return
+only `{"topics":[...]}` and treat all other output as unavailable. Render the
+selected topics, use `_SAFE_READ_ONLY_LIMITATION` when rendering is empty, and
+return the same structured answer/disclaimer contract.
+
+- [ ] **Step 4: Run focused and full engine tests**
+
+Run:
+
+```bash
+PYTHONPATH=engine/src /Users/nthnp/Developer/stockmarkethelper/engine/.venv/bin/python -m pytest engine/tests/test_ipc.py -q
+PYTHONPATH=engine/src /Users/nthnp/Developer/stockmarkethelper/engine/.venv/bin/python -m pytest engine/tests -q
+```
+
+Expected: the complete suite passes and unsafe LLM prose is never visible.
+
+- [ ] **Step 5: Commit deterministic rendering**
+
+```bash
+git add engine/src/autotrader/ipc.py engine/tests/test_ipc.py
+git commit -m "fix: render chat commentary from factual topics"
+```
+
+### Task 10: Final release verification
+
+**Files:**
+- Verify only: all feature files from `origin/main...HEAD`
+
+- [ ] **Step 1: Run release checks**
+
+Run the full engine suite, `bash app/build-app.sh`, and `git diff origin/main...HEAD --check`.
+
+- [ ] **Step 2: Obtain a fresh independent release review**
+
+Ask a review-only agent to verify that no LLM-provided prose reaches the API
+response, all server text is sourced from SharedState, the legacy Swift response
+decoder remains compatible, and chart behavior remains within the approved
+spec. Do not declare success with open Critical or Important findings.

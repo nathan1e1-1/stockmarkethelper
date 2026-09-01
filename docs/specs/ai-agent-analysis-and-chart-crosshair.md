@@ -53,8 +53,13 @@ removed; the server may append an exact historical decision record derived from
 verified data. That record names its source and date, uses past tense, and may
 not generalize into forward-looking guidance. Historical risk-control language
 is not emitted until a matching recorded risk-control event exists in the
-context. If a sentence could reasonably be read as advice, it is removed rather
-than softened.
+context.
+
+The visible response is server-rendered from supplied facts. The model may
+select a bounded set of factual topics, but it does not supply user-visible
+prose. Server templates render account, P&L, positions, risk state, and
+timestamped engine decisions. This removes open-ended action language from the
+output path entirely.
 
 ### Chart interaction
 
