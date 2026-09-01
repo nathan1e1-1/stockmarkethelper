@@ -723,3 +723,60 @@ Ask a review-only agent to verify that no LLM-provided prose reaches the API
 response, all server text is sourced from SharedState, the legacy Swift response
 decoder remains compatible, and chart behavior remains within the approved
 spec. Do not declare success with open Critical or Important findings.
+
+### Task 11: Close selector, legacy-record, and factual market-data gaps
+
+**Files:**
+- Modify: `engine/src/autotrader/models.py`
+- Modify: `engine/src/autotrader/state.py`
+- Modify: `engine/src/autotrader/ipc.py`
+- Modify: `engine/tests/test_models.py`
+- Modify: `engine/tests/test_state.py`
+- Modify: `engine/tests/test_ipc.py`
+
+- [ ] **Step 1: Write failing boundary tests**
+
+Add tests that a legacy persisted decision without a timestamp restores as
+`timestamp is None` and is not present in chat context or a rendered historical
+decision. Add a selector test that `{"topics":["positions","unknown"]}`
+returns the existing 503 rather than a partial response.
+
+Add market tests with a fake provider: a `market_session` topic renders factual
+open/closed engine-schedule state, and a `bars` topic with `AAPL` in the
+question calls `provider.bars("AAPL", history_range=HistoryRange.ONE_DAY)` and
+renders the latest bar's ticker, timestamp, O/H/L/C, and volume. A missing
+ticker, missing provider, empty bars, or provider error must render no bar
+sentence and never expose an exception.
+
+- [ ] **Step 2: Run the focused tests and verify the current code fails**
+
+Run: `PYTHONPATH=engine/src /Users/nthnp/Developer/stockmarkethelper/engine/.venv/bin/python -m pytest engine/tests/test_ipc.py engine/tests/test_models.py engine/tests/test_state.py -q`
+
+Expected: legacy decisions receive a fabricated timestamp, unknown topics are
+accepted, and market/bar topics are unsupported.
+
+- [ ] **Step 3: Implement fail-closed selectors and factual market templates**
+
+Make `AgentDecision.timestamp` type `datetime | None` while retaining
+`default_factory=_now` for new decisions. In `_decode_decision`, pass
+`timestamp=None` when legacy serialized data omits the field. In chat context
+and `_recorded_decision_sentences`, omit timestamp-less decisions.
+
+Add `market_session` and `bars` to `_ALLOWED_CHAT_TOPICS`; reject the entire
+selector when any selected topic is not in that set. Use
+`is_market_open(datetime.now(timezone.utc))` to render an engine-schedule
+market-session fact. For bars, extract one uppercase ticker from the question,
+call only the existing `provider.bars(ticker, history_range=HistoryRange.ONE_DAY)`,
+and render the final returned bar using template values. Pass `provider` and
+question into `_render_chat_topics`; swallow provider failures by omitting the
+bar sentence. Remove unused free-form sentence-filter helpers.
+
+- [ ] **Step 4: Run full verification and commit**
+
+Run the focused command above, the full engine suite, and `git diff --check`.
+Commit with:
+
+```bash
+git add engine/src/autotrader/models.py engine/src/autotrader/state.py engine/src/autotrader/ipc.py engine/tests/test_models.py engine/tests/test_state.py engine/tests/test_ipc.py
+git commit -m "fix: render verified market chat facts"
+```

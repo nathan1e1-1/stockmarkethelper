@@ -58,7 +58,10 @@ context.
 The visible response is server-rendered from supplied facts. The model may
 select a bounded set of factual topics, but it does not supply user-visible
 prose. Server templates render account, P&L, positions, risk state, and
-timestamped engine decisions. This removes open-ended action language from the
+timestamped engine decisions. It also renders current market-session status and
+the latest available one-day bar for a ticker named in the question, using the
+existing provider. Timestamp-less legacy decisions are excluded rather than
+assigned an invented date. This removes open-ended action language from the
 output path entirely.
 
 ### Chart interaction
