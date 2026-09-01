@@ -14,6 +14,25 @@ def test_agent_decision_defaults_to_hold():
     assert d.confidence == 0.1
 
 
+def test_agent_decision_timestamp_defaults_to_timezone_aware_now():
+    decision = AgentDecision(ticker="AAPL", decision=Decision.HOLD, rationale="n/a", confidence=0.1)
+
+    assert decision.timestamp.tzinfo is not None
+    assert decision.timestamp.utcoffset() is not None
+
+
+def test_agent_decision_allows_missing_legacy_timestamp():
+    decision = AgentDecision(
+        ticker="AAPL",
+        decision=Decision.HOLD,
+        rationale="legacy",
+        confidence=0.1,
+        timestamp=None,
+    )
+
+    assert decision.timestamp is None
+
+
 def test_closed_trade_fields():
     t = ClosedTrade(ticker="AAPL", qty=10.0, entry_price=100.0, exit_price=103.0, realized_pnl=30.0, exit_reason="take_profit")
     assert t.realized_pnl == 30.0

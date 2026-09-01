@@ -14,6 +14,7 @@ struct ChartsView: View {
     @State private var barsLoading = false
     @State private var visibleDomain: TimeInterval = 1
     @State private var scrollPosition = Date()
+    @State private var highlightedBar: Bar?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -128,7 +129,10 @@ struct ChartsView: View {
                 .font(.callout.weight(.medium))
                 .foregroundStyle(Color.foreground)
             ForEach(ChartRange.allCases) { range in
-                Button(rangeDisplayName(range)) { selectedRange = range }
+                Button(rangeDisplayName(range)) {
+                    highlightedBar = nil
+                    selectedRange = range
+                }
                     .buttonStyle(.bordered)
                     .tint(selectedRange == range ? Color.primary : Color.secondary)
                     .accessibilityLabel("\(rangeDisplayName(range)) range")
@@ -246,12 +250,19 @@ struct ChartsView: View {
 
                 Chart {
                     ForEach(bars) { bar in
-                        let rising = bar.c >= bar.o
-                        RectangleMark(x: .value("Time", bar.date), yStart: .value("Open", bar.o), yEnd: .value("Close", bar.c), width: .ratio(0.7))
-                            .foregroundStyle(rising ? Color.gain : Color.loss)
-                        RuleMark(x: .value("Time", bar.date), yStart: .value("Low", bar.l), yEnd: .value("High", bar.h))
-                            .lineStyle(StrokeStyle(lineWidth: 1.5, dash: rising ? [] : [3, 2]))
-                            .foregroundStyle(rising ? Color.gain : Color.loss)
+                        candleMarks(for: bar)
+                    }
+
+                    if let highlightedBar {
+                        RuleMark(x: .value("Selected time", highlightedBar.date))
+                            .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                            .foregroundStyle(Color.mutedForeground)
+                            .annotation(
+                                position: .top,
+                                overflowResolution: .init(x: .fit(to: .plot), y: .fit(to: .plot))
+                            ) {
+                                candleTooltip(for: highlightedBar)
+                            }
                     }
                 }
                 .chartScrollableAxes(.horizontal)
@@ -272,6 +283,31 @@ struct ChartsView: View {
                                 Text(axisLabel(for: date)).foregroundStyle(Color.mutedForeground)
                             }
                         }
+                    }
+                }
+                .chartOverlay { proxy in
+                    GeometryReader { geometry in
+                        Rectangle()
+                            .fill(.clear)
+                            .contentShape(Rectangle())
+                            .onContinuousHover { phase in
+                                switch phase {
+                                case .active(let location):
+                                    guard let plotAreaFrame = proxy.plotFrame else {
+                                        highlightedBar = nil
+                                        return
+                                    }
+                                    let plotFrame = geometry[plotAreaFrame]
+                                    guard plotFrame.contains(location),
+                                          let date = proxy.value(atX: location.x - plotFrame.origin.x, as: Date.self) else {
+                                        highlightedBar = nil
+                                        return
+                                    }
+                                    highlightedBar = nearestBar(to: date, in: bars)
+                                case .ended:
+                                    highlightedBar = nil
+                                }
+                            }
                     }
                 }
                 .frame(minHeight: 280, maxHeight: .infinity)
@@ -324,6 +360,41 @@ struct ChartsView: View {
         }
     }
 
+    private func candleTooltip(for bar: Bar) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(ohlcDateLabel(for: bar.date))
+            Text("O \(bar.o.formatted(.currency(code: "USD")))  H \(bar.h.formatted(.currency(code: "USD")))")
+            Text("L \(bar.l.formatted(.currency(code: "USD")))  C \(bar.c.formatted(.currency(code: "USD")))")
+            Text("Vol \(bar.v.formatted(.number.precision(.fractionLength(0))))")
+        }
+        .font(.caption2.monospacedDigit())
+        .foregroundStyle(Color.foreground)
+        .padding(8)
+        .background(Color.background)
+        .clipShape(RoundedRectangle(cornerRadius: SRadius.sm, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: SRadius.sm, style: .continuous)
+                .stroke(Color.border, lineWidth: 1)
+        )
+    }
+
+    @ChartContentBuilder
+    private func candleMarks(for bar: Bar) -> some ChartContent {
+        let rising = bar.c >= bar.o
+        let color = rising ? Color.gain : Color.loss
+        RectangleMark(
+            x: .value("Time", bar.date),
+            yStart: .value("Open", bar.o),
+            yEnd: .value("Close", bar.c),
+            width: .ratio(0.7)
+        )
+        .foregroundStyle(color)
+
+        RuleMark(x: .value("Time", bar.date), yStart: .value("Low", bar.l), yEnd: .value("High", bar.h))
+            .lineStyle(StrokeStyle(lineWidth: 1.5, dash: rising ? [] : [3, 2]))
+            .foregroundStyle(color)
+    }
+
     private func accessibilitySummary(for ticker: String, periodChange: Double) -> String {
         let close = bars.last?.c ?? 0
         let direction = periodChange >= 0 ? "up" : "down"
@@ -347,6 +418,7 @@ struct ChartsView: View {
     }
 
     private func select(_ asset: Asset) {
+        highlightedBar = nil
         selectedTicker = asset.ticker
         selectedName = asset.name
         query = asset.ticker
@@ -384,9 +456,11 @@ struct ChartsView: View {
 
     private func loadBars() async {
         guard let ticker = selectedTicker else {
+            highlightedBar = nil
             bars = []
             return
         }
+        highlightedBar = nil
         barsLoading = true
         bars = []
         let loadedBars = await client.bars(for: ticker, range: selectedRange)

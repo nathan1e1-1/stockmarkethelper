@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 
 from autotrader.state import StateStore, State
@@ -27,6 +28,36 @@ def test_state_roundtrips_decision_type(tmp_path):
     store.save(State(positions=[], decisions=[AgentDecision(ticker="AAPL", decision=Decision.BUY, rationale="t", confidence=0.7)]))
     loaded = store.load()
     assert loaded.decisions[0].decision is Decision.BUY
+
+
+def test_state_roundtrips_decision_timestamp(tmp_path):
+    store = StateStore(tmp_path)
+    timestamp = datetime(2026, 8, 31, 14, 30, tzinfo=timezone.utc)
+    decision = AgentDecision(
+        ticker="AAPL",
+        decision=Decision.BUY,
+        rationale="t",
+        confidence=0.7,
+        timestamp=timestamp,
+    )
+
+    store.save(State(decisions=[decision]))
+
+    loaded = store.load()
+    assert loaded.decisions[0].timestamp == timestamp
+
+
+def test_load_legacy_decision_without_timestamp_preserves_missing_timestamp(tmp_path):
+    store = StateStore(tmp_path)
+    store.path.write_text(json.dumps({"decisions": [{
+        "ticker": "AAPL",
+        "decision": "buy",
+        "rationale": "legacy",
+        "confidence": 0.7,
+    }]}))
+
+    loaded = store.load()
+    assert loaded.decisions[0].timestamp is None
 
 
 def test_state_roundtrips_closed_trades(tmp_path):
