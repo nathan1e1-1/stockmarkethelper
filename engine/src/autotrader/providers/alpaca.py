@@ -118,7 +118,33 @@ class AlpacaProvider:
     def news(self, ticker: str, limit: int = 5) -> list[dict]:
         req = NewsRequest(symbols=ticker, limit=limit)
         news = self._news.get_news(req).data["news"]
-        return [{"headline": n.headline, "summary": n.summary} for n in news]
+        records = [
+            {
+                "headline": self._normalized_news_text(getattr(n, "headline", None)),
+                "summary": self._normalized_news_text(getattr(n, "summary", None)),
+                "created_at": self._normalized_news_timestamp(getattr(n, "created_at", None)),
+                "source": self._normalized_news_source(getattr(n, "source", None)),
+            }
+            for n in news[:limit]
+        ]
+        return [record for record in records if record["headline"]]
+
+    @staticmethod
+    def _normalized_news_timestamp(created_at) -> str | None:
+        if not isinstance(created_at, datetime):
+            return None
+        return created_at.isoformat()
+
+    @staticmethod
+    def _normalized_news_source(source) -> str | None:
+        if source is None:
+            return None
+        normalized = str(source).strip()
+        return normalized or None
+
+    @staticmethod
+    def _normalized_news_text(value) -> str:
+        return str(value or "").strip()
 
     def gainers(self, limit: int) -> list[dict]:
         req = MostActivesRequest(by=MostActivesBy.VOLUME, top=limit)
