@@ -177,16 +177,24 @@ unblocks the next paper session only; it never changes the selected profile.
 ## Data flow
 
 1. Startup validates paper-only configuration, restores persisted safety state,
-   and reconciles broker positions and nonterminal orders before scanning.
-2. A candidate passes the existing strategy pipeline, then requests atomic
+   and performs a two-way reconciliation before scanning. Every persisted
+   reservation/order must match a broker order, and every broker position or
+   nonterminal order must match persisted state.
+2. A broker position or nonterminal order with no matching local record is an
+   orphan. The engine enters `HALTING`, creates a deterministic cancel or exit
+   intent for that orphan, and keeps the session blocked until broker status
+   confirms the order is terminal and no related broker position remains. It
+   must not import the orphan as an eligible open position or mark startup
+   reconciliation complete merely because a cleanup order was submitted.
+3. A candidate passes the existing strategy pipeline, then requests atomic
    risk admission. Rejection emits a reason and no order is sent.
-3. Admission reservation succeeds → submit paper buy → bind broker order ID →
+4. Admission reservation succeeds → submit paper buy → bind broker order ID →
    reconcile broker status. Only confirmed fills become positions.
-4. Each cycle reconciles all pending orders before considering another entry.
+5. Each cycle reconciles all pending orders before considering another entry.
    Any unavailable or unsafe data blocks new entries.
-5. A threshold breach or close cutoff latches entry blocking, cancels pending
+6. A threshold breach or close cutoff latches entry blocking, cancels pending
    buys, submits required sells, and keeps reconciling until terminal.
-6. State persists after every lifecycle/risk transition so restart recovery
+7. State persists after every lifecycle/risk transition so restart recovery
    cannot create new exposure from uncertain local state.
 
 ## Error handling and invariants
@@ -206,6 +214,10 @@ unblocks the next paper session only; it never changes the selected profile.
 - Repeated cancel/exit calls are idempotent by broker order ID and state.
 - A restart with nonterminal orders remains `HALTED` or `HALTING` until the
   broker snapshot resolves them.
+- An orphan broker position or nonterminal broker order remains `HALTING`;
+  submitting its cleanup request is not resolution. Re-arm and scanning remain
+  blocked until the broker confirms its terminal status and absence of the
+  related position.
 
 ## Test-first verification
 
@@ -219,6 +231,8 @@ plan must name exact test files and commands, including:
 - reservation release, permanent session-entry consumption after broker
   acknowledgement, partial fill, rejection, cancellation, timeout, and restart
   recovery;
+- two-way startup reconciliation for orphaned broker positions and orphaned
+  pending buys, including restart while their deterministic cleanup is pending;
 - hard-stop and daily-stop transitions, pending-buy cancellation, durable halt,
   and re-arm preconditions;
 - flatten-time entry lockout, including a failed flatten attempt followed by a
