@@ -204,7 +204,7 @@ def test_chat_endpoint_uses_read_only_factual_context_and_user_question():
 
         def complete(self, prompt):
             self.prompts.append(prompt)
-            return "Today's loss is primarily unrealized and comes from the supplied open-position data."
+            return '{"topics": ["pnl"]}'
 
     state = SharedState()
     state.equity = Equity(equity=99_000.0, day_start_equity=100_000.0, peak_equity=101_000.0, day="2026-08-30")
@@ -235,7 +235,7 @@ def test_chat_endpoint_uses_read_only_factual_context_and_user_question():
 
     assert response.status_code == 200
     assert response.json() == {
-        "answer": "Today's loss is primarily unrealized and comes from the supplied open-position data.",
+        "answer": "Daily P&L is -$1,000.00. Realized P&L is -$400.00. Unrealized P&L is -$600.00.",
         "disclaimer": _INFORMATIONAL_DISCLAIMER,
     }
     prompt = llm.prompts[0]
@@ -258,19 +258,9 @@ def test_chat_endpoint_uses_read_only_factual_context_and_user_question():
     assert "--- BEGIN UNTRUSTED USER QUESTION (JSON) ---" in prompt
     assert "\"question\": \"What is driving today's P&L loss?\"" in prompt
     assert "--- END UNTRUSTED USER QUESTION (JSON) ---" in prompt
-    assert "informational/read-only" in prompt
-    assert "no orders" in prompt
-    assert "no promised returns" in prompt
-    assert "never disable or bypass risk" in prompt
-    assert "do not recommend, suggest, or imply BUY, SELL, or order action" in prompt
-    assert "You may explain factual account, P&L, position, decision, and market data" in prompt
-    assert "Do not give personalized buy, sell, or hold instructions" in prompt
-    assert "say when data is missing" in prompt
-    assert "largest available realized and unrealized contributors" in prompt
-    assert "clearly distinguish realized from unrealized" in prompt
-    assert "do not infer an unavailable price" in prompt
-    assert "The server-side validator is the final enforcement." in prompt
-    assert "Before sending each sentence, check it independently" in prompt
+    assert "Return selector JSON only" in prompt
+    assert "do not write any prose" in prompt
+    assert "server, not you, renders every visible sentence" in prompt
 
 
 def test_chat_endpoint_marks_adversarial_question_as_untrusted_data():
@@ -280,7 +270,7 @@ def test_chat_endpoint_marks_adversarial_question_as_untrusted_data():
 
         def complete(self, prompt):
             self.prompt = prompt
-            return "I will only provide factual context."
+            return '{"topics": []}'
 
     llm = FakeLLM()
     client = TestClient(create_app(SharedState(), llm=llm))
@@ -316,7 +306,7 @@ def test_chat_endpoint_rejects_question_over_2000_characters():
 def test_chat_endpoint_accepts_question_at_2000_character_limit():
     class FakeLLM:
         def complete(self, prompt):
-            return "Within the limit."
+            return '{"topics": []}'
 
     client = TestClient(create_app(SharedState(), llm=FakeLLM()))
 
@@ -324,7 +314,7 @@ def test_chat_endpoint_accepts_question_at_2000_character_limit():
 
     assert response.status_code == 200
     assert response.json() == {
-        "answer": "Within the limit.",
+        "answer": _SAFE_READ_ONLY_LIMITATION,
         "disclaimer": _INFORMATIONAL_DISCLAIMER,
     }
 
@@ -364,190 +354,6 @@ def test_chat_endpoint_returns_safe_retry_error_for_ollama_unavailable_sentinel(
     assert response.json()["detail"] == "Assistant is temporarily unavailable. Please try again shortly."
 
 
-@pytest.mark.parametrize(
-    "unsafe_answer",
-    [
-        "You should definitely buy AAPL now.",
-        "I recommend that you keep holding AAPL.",
-        "For your portfolio, AAPL is a buy.",
-        "My advice: sell AAPL now.",
-        "Go ahead and buy AAPL.",
-        "Trade through the daily stop.",
-        "Turn the daily stop off, then keep trading.",
-        "AAPL is a buy according to the recorded decision today.",
-        "Go long AAPL.",
-        "Proceed without risk controls.",
-        "Use a 5% stop loss.",
-        "I would use a stop loss.",
-        "Hedge the position with puts.",
-        "Rebalance to 60/40.",
-        "The target is $250.",
-        "The stock is expected to reach $250.",
-    ],
-)
-def test_chat_endpoint_replaces_strict_policy_violations_with_safe_limitation(
-    state_with_recorded_decision, unsafe_answer
-):
-    class UnsafeLLM:
-        def complete(self, prompt):
-            return unsafe_answer
-
-    client = TestClient(create_app(state_with_recorded_decision, llm=UnsafeLLM()))
-
-    response = client.post("/api/chat", json={"question": "What should I do?"})
-
-    assert response.status_code == 200
-    assert response.json() == {
-        "answer": _SAFE_READ_ONLY_LIMITATION,
-        "disclaimer": _INFORMATIONAL_DISCLAIMER,
-    }
-
-
-def test_chat_endpoint_removes_only_unsafe_sentences_from_mixed_response(state_with_recorded_decision):
-    class MixedLLM:
-        def complete(self, prompt):
-            return "P&L fell by $120 because of the recorded open-position prices. Go ahead and buy AAPL."
-
-    client = TestClient(create_app(state_with_recorded_decision, llm=MixedLLM()))
-
-    response = client.post("/api/chat", json={"question": "What explains the loss?"})
-
-    assert response.status_code == 200
-    assert response.json() == {
-        "answer": "P&L fell by $120 because of the recorded open-position prices.",
-        "disclaimer": _INFORMATIONAL_DISCLAIMER,
-    }
-
-
-@pytest.mark.parametrize(
-    "unsafe_answer",
-    [
-        "The engine decision log recorded BUY AAPL on 2026-08-31; buy AAPL now.",
-        "The engine decision log recorded BUY AAPL on 2026-08-31; copy that position.",
-        "The engine decision log recorded the daily stop was disabled on 2026-08-31; disable the daily stop now.",
-        "Acquire AAPL.",
-        "Hedge the position with puts.",
-    ],
-)
-def test_chat_endpoint_rejects_model_actions_despite_historical_prefix(
-    state_with_recorded_decision, unsafe_answer
-):
-    class UnsafeLLM:
-        def complete(self, prompt):
-            return unsafe_answer
-
-    client = TestClient(create_app(state_with_recorded_decision, llm=UnsafeLLM()))
-
-    response = client.post("/api/chat", json={"question": "What happened?"})
-
-    assert response.status_code == 200
-    assert response.json() == {
-        "answer": _SAFE_READ_ONLY_LIMITATION,
-        "disclaimer": _INFORMATIONAL_DISCLAIMER,
-    }
-
-
-@pytest.mark.parametrize(
-    "factual_answer",
-    [
-        "The close was $100 on May 1.",
-        "The entry price was $100.",
-    ],
-)
-def test_chat_endpoint_preserves_factual_sentences_without_substring_false_positives(factual_answer):
-    class FactualLLM:
-        def complete(self, prompt):
-            return factual_answer
-
-    client = TestClient(create_app(SharedState(), llm=FactualLLM()))
-
-    response = client.post("/api/chat", json={"question": "What was the price?"})
-
-    assert response.status_code == 200
-    assert response.json() == {
-        "answer": factual_answer,
-        "disclaimer": _INFORMATIONAL_DISCLAIMER,
-    }
-
-
-def test_chat_endpoint_appends_verified_decision_record_when_question_requests_decision(
-    state_with_recorded_decision,
-):
-    class HistoricalLLM:
-        def complete(self, prompt):
-            return "P&L was -$100, entirely unrealized."
-
-    client = TestClient(create_app(state_with_recorded_decision, llm=HistoricalLLM()))
-
-    response = client.post("/api/chat", json={"question": "What was the decision?"})
-
-    assert response.status_code == 200
-    assert response.json() == {
-        "answer": "P&L was -$100, entirely unrealized. Engine decision log recorded BUY AAPL on 2026-08-31.",
-        "disclaimer": _INFORMATIONAL_DISCLAIMER,
-    }
-
-
-def test_chat_endpoint_does_not_append_verified_decision_record_for_non_decision_question(
-    state_with_recorded_decision,
-):
-    class HistoricalLLM:
-        def complete(self, prompt):
-            return "P&L was -$100, entirely unrealized."
-
-    client = TestClient(create_app(state_with_recorded_decision, llm=HistoricalLLM()))
-
-    response = client.post("/api/chat", json={"question": "What was the P&L?"})
-
-    assert response.status_code == 200
-    assert response.json() == {
-        "answer": "P&L was -$100, entirely unrealized.",
-        "disclaimer": _INFORMATIONAL_DISCLAIMER,
-    }
-
-
-def test_chat_endpoint_never_appends_historical_daily_stop_record(state_with_recorded_decision):
-    class HistoricalLLM:
-        def complete(self, prompt):
-            return "The engine decision log recorded the daily stop was disabled on 2026-08-31."
-
-    client = TestClient(create_app(state_with_recorded_decision, llm=HistoricalLLM()))
-
-    response = client.post("/api/chat", json={"question": "What risk control was recorded?"})
-
-    assert response.status_code == 200
-    assert response.json() == {
-        "answer": _SAFE_READ_ONLY_LIMITATION,
-        "disclaimer": _INFORMATIONAL_DISCLAIMER,
-    }
-
-
-@pytest.mark.parametrize(
-    "unsafe_answer",
-    [
-        "The engine decision log recorded BUY AAPL.",
-        "The recorded BUY AAPL on 2026-08-31.",
-        "The engine decision log recorded BUY AAPL on 2026-08-31; follow that trade.",
-    ],
-)
-def test_chat_endpoint_rejects_historical_decisions_missing_required_attribution(
-    state_with_recorded_decision, unsafe_answer
-):
-    class UnsafeLLM:
-        def complete(self, prompt):
-            return unsafe_answer
-
-    client = TestClient(create_app(state_with_recorded_decision, llm=UnsafeLLM()))
-
-    response = client.post("/api/chat", json={"question": "What did the engine record?"})
-
-    assert response.status_code == 200
-    assert response.json() == {
-        "answer": _SAFE_READ_ONLY_LIMITATION,
-        "disclaimer": _INFORMATIONAL_DISCLAIMER,
-    }
-
-
 def test_chat_context_identifies_recorded_decision_source_and_timestamp(state_with_recorded_decision):
     decision = state_with_recorded_decision.decisions[0]
 
@@ -565,148 +371,120 @@ def test_chat_context_identifies_recorded_decision_source_and_timestamp(state_wi
     ]
 
 
-def test_chat_endpoint_replaces_personalized_hold_instruction_with_safe_limitation():
-    class UnsafeLLM:
+def test_create_app_has_no_executor_dependency():
+    assert "executor" not in create_app.__code__.co_varnames
+
+
+def test_chat_endpoint_renders_selected_factual_topics_and_never_returns_model_prose(state_with_recorded_decision):
+    class FakeLLM:
+        def __init__(self):
+            self.prompt = ""
+
         def complete(self, prompt):
-            return "You should hold AAPL."
+            self.prompt = prompt
+            return '{"topics": ["pnl", "decisions"]}'
 
-    client = TestClient(create_app(SharedState(), llm=UnsafeLLM()))
+    state = state_with_recorded_decision
+    state.equity = Equity(equity=99_000.0, day_start_equity=100_000.0, peak_equity=101_000.0, day="2026-08-31")
+    state.pnl_attribution = {"daily_pnl": -1_000.0, "realized_pnl": -400.0, "unrealized_pnl": -600.0}
+    llm = FakeLLM()
 
-    response = client.post("/api/chat", json={"question": "What should I do?"})
+    response = TestClient(create_app(state, llm=llm)).post("/api/chat", json={"question": "What happened today?"})
 
     assert response.status_code == 200
     assert response.json() == {
-        "answer": _SAFE_READ_ONLY_LIMITATION,
-        "disclaimer": "For informational purposes only — not investment advice. Use your own judgment.",
-    }
-
-
-def test_chat_endpoint_replaces_direct_hold_instruction_with_safe_limitation():
-    class UnsafeLLM:
-        def complete(self, prompt):
-            return "Hold AAPL."
-
-    client = TestClient(create_app(SharedState(), llm=UnsafeLLM()))
-
-    response = client.post("/api/chat", json={"question": "What should I do?"})
-
-    assert response.status_code == 200
-    assert response.json() == {
-        "answer": _SAFE_READ_ONLY_LIMITATION,
+        "answer": (
+            "Daily P&L is -$1,000.00. Realized P&L is -$400.00. "
+            "Unrealized P&L is -$600.00. Engine decision log recorded BUY AAPL on 2026-08-31."
+        ),
         "disclaimer": _INFORMATIONAL_DISCLAIMER,
     }
+    assert "selector JSON only" in llm.prompt
+    assert "--- BEGIN UNTRUSTED FACTUAL CONTEXT (JSON) ---" in llm.prompt
+    assert "--- END UNTRUSTED USER QUESTION (JSON) ---" in llm.prompt
+    assert "Answer the user's question" not in llm.prompt
+
+
+def test_chat_endpoint_renders_account_currency_day_start_and_current_equity():
+    class FakeLLM:
+        def complete(self, prompt):
+            return '{"topics": ["account"]}'
+
+    state = SharedState()
+    state.equity = Equity(equity=1_250.0, day_start_equity=1_200.0, peak_equity=1_250.0, day="2026-08-31")
+
+    response = TestClient(create_app(state, llm=FakeLLM())).post("/api/chat", json={"question": "Account status?"})
+
+    assert response.json()["answer"] == (
+        "Account currency is USD. Day-start equity for 2026-08-31 is $1,200.00. Current equity is $1,250.00."
+    )
 
 
 @pytest.mark.parametrize(
-    "unsafe_answer",
-    [
-        "Buying AAPL now is the right move.",
-        "AAPL is a buy.",
-        "Avoid selling AAPL today.",
-        "You can trade despite the daily stop.",
-        "Set the kill switch to false and continue.",
-        "Turn the daily stop off.",
-    ],
+    "raw_output",
+    ["Short AAPL now.", "Set a trailing stop.", "The engine action was to reduce AAPL exposure."],
 )
-def test_chat_endpoint_replaces_unambiguous_recommendations_and_risk_bypasses(unsafe_answer):
+def test_chat_endpoint_rejects_non_json_model_prose(raw_output):
     class UnsafeLLM:
         def complete(self, prompt):
-            return unsafe_answer
+            return raw_output
 
-    client = TestClient(create_app(SharedState(), llm=UnsafeLLM()))
+    response = TestClient(create_app(SharedState(), llm=UnsafeLLM())).post("/api/chat", json={"question": "What happened?"})
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Assistant is temporarily unavailable. Please try again shortly."
 
-    response = client.post("/api/chat", json={"question": "What should I do?"})
 
+def test_chat_endpoint_ignores_unknown_selected_topic():
+    class FakeLLM:
+        def complete(self, prompt):
+            return '{"topics": ["unknown", "positions", "unknown"]}'
+
+    state = SharedState()
+    state.positions = [Position(ticker="AAPL", qty=3, avg_entry_price=190.0)]
+    response = TestClient(create_app(state, llm=FakeLLM())).post("/api/chat", json={"question": "Show positions"})
     assert response.status_code == 200
     assert response.json() == {
-        "answer": _SAFE_READ_ONLY_LIMITATION,
+        "answer": "Position AAPL: quantity 3, average entry price $190.00.",
         "disclaimer": _INFORMATIONAL_DISCLAIMER,
     }
 
 
-def test_chat_endpoint_replaces_advisory_buying_recommendation_with_safe_limitation():
-    class UnsafeLLM:
+@pytest.mark.parametrize("selector", ['{"topics": []}', '{"topics": ["not-a-topic"]}', '{"topics": ["pnl"]}'])
+def test_chat_endpoint_returns_safe_limitation_when_no_selected_topic_can_render(selector):
+    class FakeLLM:
         def complete(self, prompt):
-            return "I advise buying AAPL."
+            return selector
 
-    client = TestClient(create_app(SharedState(), llm=UnsafeLLM()))
-
-    response = client.post("/api/chat", json={"question": "What should I do?"})
-
+    response = TestClient(create_app(SharedState(), llm=FakeLLM())).post("/api/chat", json={"question": "How is the account?"})
     assert response.status_code == 200
-    assert "cannot offer trading recommendations, promises, or risk-control bypass guidance" in response.json()["answer"]
-    assert response.json()["disclaimer"] == _INFORMATIONAL_DISCLAIMER
+    assert response.json() == {"answer": _SAFE_READ_ONLY_LIMITATION, "disclaimer": _INFORMATIONAL_DISCLAIMER}
 
 
-def test_chat_endpoint_replaces_advice_directed_at_user_with_safe_limitation():
-    class UnsafeLLM:
+@pytest.mark.parametrize("selector", ["not json", '[]', '{}', '{"topics": "pnl"}', '{"topics": ["pnl", 1]}'])
+def test_chat_endpoint_returns_503_for_malformed_selector_json(selector):
+    class FakeLLM:
         def complete(self, prompt):
-            return "I advise you buy AAPL."
+            return selector
 
-    client = TestClient(create_app(SharedState(), llm=UnsafeLLM()))
-
-    response = client.post("/api/chat", json={"question": "What should I do?"})
-
-    assert response.status_code == 200
-    assert "cannot offer trading recommendations, promises, or risk-control bypass guidance" in response.json()["answer"]
-    assert response.json()["disclaimer"] == _INFORMATIONAL_DISCLAIMER
+    response = TestClient(create_app(SharedState(), llm=FakeLLM())).post("/api/chat", json={"question": "How is the account?"})
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Assistant is temporarily unavailable. Please try again shortly."
 
 
-def test_chat_endpoint_replaces_purchase_recommendation_with_safe_limitation():
-    class UnsafeLLM:
+def test_chat_endpoint_renders_positions_only_from_ticker_quantity_and_average_entry():
+    class FakeLLM:
         def complete(self, prompt):
-            return "We recommend purchasing AAPL."
+            return '{"topics": ["positions"]}'
 
-    client = TestClient(create_app(SharedState(), llm=UnsafeLLM()))
-
-    response = client.post("/api/chat", json={"question": "What should I do?"})
-
-    assert response.status_code == 200
-    assert "cannot offer trading recommendations, promises, or risk-control bypass guidance" in response.json()["answer"]
-    assert response.json()["disclaimer"] == _INFORMATIONAL_DISCLAIMER
-
-
-def test_chat_endpoint_replaces_direct_order_recommendation_with_safe_limitation():
-    class UnsafeLLM:
-        def complete(self, prompt):
-            return "Order 10 shares of AAPL now."
-
-    client = TestClient(create_app(SharedState(), llm=UnsafeLLM()))
-
-    response = client.post("/api/chat", json={"question": "What should I do?"})
-
-    assert response.status_code == 200
-    assert "cannot offer trading recommendations, promises, or risk-control bypass guidance" in response.json()["answer"]
-    assert response.json()["disclaimer"] == _INFORMATIONAL_DISCLAIMER
-
-
-def test_chat_endpoint_replaces_profit_guarantee_with_safe_limitation():
-    class UnsafeLLM:
-        def complete(self, prompt):
-            return "This trade guarantees a profit."
-
-    client = TestClient(create_app(SharedState(), llm=UnsafeLLM()))
-
-    response = client.post("/api/chat", json={"question": "What returns can I expect?"})
-
-    assert response.status_code == 200
-    assert "cannot offer trading recommendations, promises, or risk-control bypass guidance" in response.json()["answer"]
-    assert response.json()["disclaimer"] == _INFORMATIONAL_DISCLAIMER
-
-
-def test_chat_endpoint_replaces_risk_bypass_guidance_with_safe_limitation():
-    class UnsafeLLM:
-        def complete(self, prompt):
-            return "Disable the kill switch before trading."
-
-    client = TestClient(create_app(SharedState(), llm=UnsafeLLM()))
-
-    response = client.post("/api/chat", json={"question": "How can I keep trading?"})
-
-    assert response.status_code == 200
-    assert "cannot offer trading recommendations, promises, or risk-control bypass guidance" in response.json()["answer"]
-    assert response.json()["disclaimer"] == _INFORMATIONAL_DISCLAIMER
-
-
-def test_create_app_has_no_executor_dependency():
-    assert "executor" not in create_app.__code__.co_varnames
+    state = SharedState()
+    state.positions = [
+        Position(
+            ticker="AAPL",
+            qty=3.5,
+            avg_entry_price=190.25,
+            opened_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        )
+    ]
+    answer = TestClient(create_app(state, llm=FakeLLM())).post("/api/chat", json={"question": "Positions?"}).json()["answer"]
+    assert answer == "Position AAPL: quantity 3.5, average entry price $190.25."
+    assert "2025" not in answer
