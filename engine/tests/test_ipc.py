@@ -395,7 +395,8 @@ def test_chat_endpoint_renders_selected_factual_topics_and_never_returns_model_p
     assert response.json() == {
         "answer": (
             "Daily P&L is -$1,000.00. Realized P&L is -$400.00. "
-            "Unrealized P&L is -$600.00. Engine decision log recorded BUY AAPL on 2026-08-31."
+            "Unrealized P&L is -$600.00. "
+            "Engine decision log recorded BUY AAPL on 2026-08-31T14:30:00+00:00."
         ),
         "disclaimer": _INFORMATIONAL_DISCLAIMER,
     }
@@ -460,7 +461,18 @@ def test_chat_endpoint_returns_safe_limitation_when_no_selected_topic_can_render
     assert response.json() == {"answer": _SAFE_READ_ONLY_LIMITATION, "disclaimer": _INFORMATIONAL_DISCLAIMER}
 
 
-@pytest.mark.parametrize("selector", ["not json", '[]', '{}', '{"topics": "pnl"}', '{"topics": ["pnl", 1]}'])
+@pytest.mark.parametrize(
+    "selector",
+    [
+        "not json",
+        '[]',
+        '{}',
+        '{"topics": "pnl"}',
+        '{"topics": ["pnl", 1]}',
+        '{"topics": [], "prose": "BUY AAPL"}',
+        '{"topics": ["pnl"], "unexpected": true}',
+    ],
+)
 def test_chat_endpoint_returns_503_for_malformed_selector_json(selector):
     class FakeLLM:
         def complete(self, prompt):

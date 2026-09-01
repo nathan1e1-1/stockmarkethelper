@@ -150,7 +150,7 @@ def _filter_actionable_sentences(answer: str) -> str:
 def _recorded_decision_sentences(decisions: list) -> list[str]:
     return [
         "Engine decision log recorded "
-        f"{decision.decision.value.upper()} {decision.ticker} on {decision.timestamp.date().isoformat()}."
+        f"{decision.decision.value.upper()} {decision.ticker} on {decision.timestamp.isoformat()}."
         for decision in decisions
     ]
 
@@ -161,7 +161,7 @@ def _selected_chat_topics(raw: str) -> list[str]:
     except (TypeError, json.JSONDecodeError) as error:
         raise ValueError("invalid chat topic selector") from error
 
-    if not isinstance(payload, dict) or not isinstance(payload.get("topics"), list):
+    if not isinstance(payload, dict) or set(payload) != {"topics"} or not isinstance(payload["topics"], list):
         raise ValueError("invalid chat topic selector")
     if any(not isinstance(topic, str) for topic in payload["topics"]):
         raise ValueError("invalid chat topic selector")
