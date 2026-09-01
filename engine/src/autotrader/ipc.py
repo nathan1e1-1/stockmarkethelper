@@ -19,8 +19,17 @@ _ACTION_LANGUAGE = re.compile(
     r"\b(?:buy|buying|bought|sell|selling|sold|hold|holding|held|trade|trading|traded|"
     r"order|orders|ordered|ordering|purchase|purchases|purchased|purchasing|liquidate|"
     r"liquidates|liquidated|liquidating|enter|enters|entered|entering|exit|exits|exited|exiting|"
-    r"hedge|hedges|hedged|hedging|rebalance|rebalances|rebalanced|rebalancing|"
+    r"acquire|acquires|acquired|acquiring|accumulate|accumulates|accumulated|accumulating|"
+    r"dump|dumps|dumped|dumping|invest|invests|invested|investing|cover|covers|covered|covering|"
+    r"copy|copies|copied|copying|"
     r"(?:go|stay|get)\s+(?:long|short))\b",
+    re.IGNORECASE,
+)
+_POSITION_ACTION = re.compile(r"\b(?:open|close)\s+(?:a|the)\s+position\b", re.IGNORECASE)
+_RISK_CONTROL_LANGUAGE = re.compile(
+    r"\b(?:stop\s+loss|daily\s+stop|kill\s+switch|hedge|hedges|hedged|hedging|"
+    r"rebalance|rebalances|rebalanced|rebalancing|position\s+sizing|"
+    r"take\s+profit|target)\b",
     re.IGNORECASE,
 )
 _ADVICE_FRAMING = re.compile(
@@ -31,8 +40,8 @@ _ADVICE_FRAMING = re.compile(
     re.IGNORECASE,
 )
 _PROSPECTIVE_FRAMING = re.compile(
-    r"\b(?:will|would|could|may|might|likely|expect(?:s|ed|ing)?|entry|breakout|rally|"
-    r"forecast|predict(?:s|ed|ing)?)\b",
+    r"\b(?:will|would|could|might|likely|expect(?:s|ed|ing)?|forecast|predict(?:s|ed|ing)?)\b|"
+    r"\bmay\s+(?:rise|fall|increase|decrease|gain|lose|reach|move|trade|continue)\b",
     re.IGNORECASE,
 )
 _RISK_CONTROL_BYPASS = re.compile(
@@ -54,8 +63,8 @@ _PROMISE_FRAMING = re.compile(
     r".{0,80}\b(?:guaranteed|promised|certain|sure)\b",
     re.IGNORECASE,
 )
-_HISTORICAL_ATTRIBUTION = re.compile(r"\b(?:recorded|logged|executed|filed)\b", re.IGNORECASE)
 _PRICE_TARGET = re.compile(r"\btarget\s+(?:is|of|at|to)\s+\$?\d", re.IGNORECASE)
+_RECORDED_DECISION_QUESTION = re.compile(r"\b(?:decision|decisions|trade|trades|action)\b", re.IGNORECASE)
 
 
 class SharedState:
@@ -115,16 +124,7 @@ def _chat_context(state: SharedState) -> dict[str, Any]:
     }
 
 
-def _is_historical_record(sentence: str, allowed_decision_dates: set[str]) -> bool:
-    if "engine decision log" not in sentence.casefold() or not _HISTORICAL_ATTRIBUTION.search(sentence):
-        return False
-    return any(
-        re.search(rf"(?<![\d-]){re.escape(decision_date)}(?![\d-])", sentence) is not None
-        for decision_date in allowed_decision_dates
-    )
-
-
-def _filter_actionable_sentences(answer: str, allowed_decision_dates: set[str]) -> str:
+def _filter_actionable_sentences(answer: str) -> str:
     sentences = re.split(r"(?<=[.!?])(?=\s|$)|\n+", answer.strip())
     factual_sentences = []
     for sentence in sentences:
@@ -138,13 +138,24 @@ def _filter_actionable_sentences(answer: str, allowed_decision_dates: set[str]) 
             or _PROMISE_FRAMING.search(sentence)
         ):
             continue
-        historical_record = _is_historical_record(sentence, allowed_decision_dates)
-        if _RISK_CONTROL_BYPASS.search(sentence) and not historical_record:
+        if _RISK_CONTROL_BYPASS.search(sentence) or _RISK_CONTROL_LANGUAGE.search(sentence):
             continue
-        if _ACTION_LANGUAGE.search(sentence) and not historical_record:
+        if _ACTION_LANGUAGE.search(sentence) or _POSITION_ACTION.search(sentence):
             continue
         factual_sentences.append(sentence)
     return " ".join(factual_sentences)
+
+
+def _recorded_decision_sentences(decisions: list) -> list[str]:
+    return [
+        "Engine decision log recorded "
+        f"{decision.decision.value.upper()} {decision.ticker} on {decision.timestamp.date().isoformat()}."
+        for decision in decisions
+    ]
+
+
+def _question_requests_recorded_decisions(question: str) -> bool:
+    return _RECORDED_DECISION_QUESTION.search(question) is not None
 
 
 def create_app(state: SharedState, provider=None, llm=None) -> FastAPI:
@@ -212,10 +223,8 @@ def create_app(state: SharedState, provider=None, llm=None) -> FastAPI:
             "factual commentary only. Do not provide any buy, sell, hold, order, or trade "
             "instruction or recommendation in any framing; do not give prospective risk-control "
             "instruction or predictive framing that implies action, including soft-hedged advice. "
-            "The sole exception is a strictly historical action or risk measure explicitly "
-            "attributed to the named source engine decision log, dated with an ISO calendar date "
-            "supplied in the context, and described using past-tense attribution such as recorded, "
-            "logged, executed, or filed; it must not generalize forward. Perform a tense check. "
+            "Never output historical action or risk-control records; the server exclusively renders "
+            "verified decision records from its current state. Perform a tense check. "
             "Before sending each sentence, check it independently: if it violates this policy or "
             "you are uncertain, remove the sentence rather than soften it. The server-side validator "
             "is the final enforcement. You must say when data is missing. When P&L is requested, "
@@ -233,11 +242,17 @@ def create_app(state: SharedState, provider=None, llm=None) -> FastAPI:
             answer = str(llm.complete(prompt))
             if answer.strip() == _UNAVAILABLE_LLM_RESPONSE:
                 raise RuntimeError("llm unavailable")
-            allowed_decision_dates = {decision.timestamp.date().isoformat() for decision in state.decisions}
-            answer = _filter_actionable_sentences(answer, allowed_decision_dates)
-            if not answer:
+            answer = _filter_actionable_sentences(answer)
+            decision_records = (
+                _recorded_decision_sentences(state.decisions)
+                if _question_requests_recorded_decisions(request.question)
+                else []
+            )
+            response_parts = [answer, *decision_records]
+            response_parts = [part for part in response_parts if part]
+            if not response_parts:
                 return {"answer": _SAFE_READ_ONLY_LIMITATION, "disclaimer": _INFORMATIONAL_DISCLAIMER}
-            return {"answer": answer, "disclaimer": _INFORMATIONAL_DISCLAIMER}
+            return {"answer": " ".join(response_parts), "disclaimer": _INFORMATIONAL_DISCLAIMER}
         except Exception as error:
             raise HTTPException(
                 status_code=503,

@@ -419,34 +419,105 @@ def test_chat_endpoint_removes_only_unsafe_sentences_from_mixed_response(state_w
     }
 
 
-def test_chat_endpoint_preserves_sourced_dated_historical_decision(state_with_recorded_decision):
-    class HistoricalLLM:
+@pytest.mark.parametrize(
+    "unsafe_answer",
+    [
+        "The engine decision log recorded BUY AAPL on 2026-08-31; buy AAPL now.",
+        "The engine decision log recorded BUY AAPL on 2026-08-31; copy that position.",
+        "The engine decision log recorded the daily stop was disabled on 2026-08-31; disable the daily stop now.",
+        "Acquire AAPL.",
+        "Hedge the position with puts.",
+    ],
+)
+def test_chat_endpoint_rejects_model_actions_despite_historical_prefix(
+    state_with_recorded_decision, unsafe_answer
+):
+    class UnsafeLLM:
         def complete(self, prompt):
-            return "The engine decision log recorded BUY AAPL on 2026-08-31."
+            return unsafe_answer
 
-    client = TestClient(create_app(state_with_recorded_decision, llm=HistoricalLLM()))
+    client = TestClient(create_app(state_with_recorded_decision, llm=UnsafeLLM()))
 
-    response = client.post("/api/chat", json={"question": "What did the engine record?"})
+    response = client.post("/api/chat", json={"question": "What happened?"})
 
     assert response.status_code == 200
     assert response.json() == {
-        "answer": "The engine decision log recorded BUY AAPL on 2026-08-31.",
+        "answer": _SAFE_READ_ONLY_LIMITATION,
         "disclaimer": _INFORMATIONAL_DISCLAIMER,
     }
 
 
-def test_chat_endpoint_preserves_sourced_dated_historical_risk_measure(state_with_recorded_decision):
+@pytest.mark.parametrize(
+    "factual_answer",
+    [
+        "The close was $100 on May 1.",
+        "The entry price was $100.",
+    ],
+)
+def test_chat_endpoint_preserves_factual_sentences_without_substring_false_positives(factual_answer):
+    class FactualLLM:
+        def complete(self, prompt):
+            return factual_answer
+
+    client = TestClient(create_app(SharedState(), llm=FactualLLM()))
+
+    response = client.post("/api/chat", json={"question": "What was the price?"})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "answer": factual_answer,
+        "disclaimer": _INFORMATIONAL_DISCLAIMER,
+    }
+
+
+def test_chat_endpoint_appends_verified_decision_record_when_question_requests_decision(
+    state_with_recorded_decision,
+):
+    class HistoricalLLM:
+        def complete(self, prompt):
+            return "P&L was -$100, entirely unrealized."
+
+    client = TestClient(create_app(state_with_recorded_decision, llm=HistoricalLLM()))
+
+    response = client.post("/api/chat", json={"question": "What was the decision?"})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "answer": "P&L was -$100, entirely unrealized. Engine decision log recorded BUY AAPL on 2026-08-31.",
+        "disclaimer": _INFORMATIONAL_DISCLAIMER,
+    }
+
+
+def test_chat_endpoint_does_not_append_verified_decision_record_for_non_decision_question(
+    state_with_recorded_decision,
+):
+    class HistoricalLLM:
+        def complete(self, prompt):
+            return "P&L was -$100, entirely unrealized."
+
+    client = TestClient(create_app(state_with_recorded_decision, llm=HistoricalLLM()))
+
+    response = client.post("/api/chat", json={"question": "What was the P&L?"})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "answer": "P&L was -$100, entirely unrealized.",
+        "disclaimer": _INFORMATIONAL_DISCLAIMER,
+    }
+
+
+def test_chat_endpoint_never_appends_historical_daily_stop_record(state_with_recorded_decision):
     class HistoricalLLM:
         def complete(self, prompt):
             return "The engine decision log recorded the daily stop was disabled on 2026-08-31."
 
     client = TestClient(create_app(state_with_recorded_decision, llm=HistoricalLLM()))
 
-    response = client.post("/api/chat", json={"question": "What risk action was recorded?"})
+    response = client.post("/api/chat", json={"question": "What risk control was recorded?"})
 
     assert response.status_code == 200
     assert response.json() == {
-        "answer": "The engine decision log recorded the daily stop was disabled on 2026-08-31.",
+        "answer": _SAFE_READ_ONLY_LIMITATION,
         "disclaimer": _INFORMATIONAL_DISCLAIMER,
     }
 
