@@ -47,12 +47,14 @@ targets, or rebalancing; predictive framing that implies an action; or
 soft-hedged recommendations.
 
 The sole exception is a strictly historical action or risk-control measure that
-is explicitly attributed to a named, dated, recorded decision in the supplied
-context. That statement must name its source and date, use past tense, and may
-not generalize into forward-looking guidance. The generation prompt requires a
-per-sentence self-check; the server-side response validator is the final
-enforcement point. If a sentence could reasonably be read as advice, it is
-removed rather than softened.
+is explicitly rendered by the server from a named, dated, recorded decision in
+the supplied context. Model-produced action or risk-control language is always
+removed; the server may append an exact historical decision record derived from
+verified data. That record names its source and date, uses past tense, and may
+not generalize into forward-looking guidance. Historical risk-control language
+is not emitted until a matching recorded risk-control event exists in the
+context. If a sentence could reasonably be read as advice, it is removed rather
+than softened.
 
 ### Chart interaction
 

@@ -535,3 +535,93 @@ Ask a fresh review-only subagent to evaluate the entire diff against the
 revised spec, testing adversarial advice phrasing and the strict historical
 exception. Do not proceed to integration with an open Critical or Important
 finding.
+
+### Revision: closed server-rendered historical records
+
+The sentence filter must no longer accept an arbitrary model sentence because
+it contains a source/date phrase. The model is never allowed to emit an action
+or risk-control sentence. When a question asks about recorded decisions or
+trades, the server appends only exact, past-tense record strings it constructs
+from `state.decisions`; risk-control records are omitted because no matching
+event record is currently supplied. This eliminates fabricated attribution and
+semicolon clause-stuffing.
+
+### Task 8: Replace model historical exceptions with verified record rendering
+
+**Files:**
+- Modify: `engine/src/autotrader/ipc.py`
+- Modify: `engine/tests/test_ipc.py`
+
+- [ ] **Step 1: Write failing closed-policy tests**
+
+Add parameterized tests that each return the safe limitation when produced by
+the LLM, even with a valid source/date prefix:
+
+```python
+[
+    "The engine decision log recorded BUY AAPL on 2026-08-31; buy AAPL now.",
+    "The engine decision log recorded BUY AAPL on 2026-08-31; copy that position.",
+    "The engine decision log recorded the daily stop was disabled on 2026-08-31; disable the daily stop now.",
+    "Acquire AAPL.",
+    "Hedge the position with puts.",
+]
+```
+
+Add preservation tests proving `The close was $100 on May 1.` and `The entry
+price was $100.` remain in the answer. Add a decision-question test with one
+timestamped AAPL BUY record and an LLM answer containing only factual P&L; the
+response answer must append exactly `Engine decision log recorded BUY AAPL on
+2026-08-31.`. Add a non-decision-question test proving that record is not
+appended. Add a test proving no historical daily-stop sentence is ever appended
+without a supplied recorded risk-control event.
+
+- [ ] **Step 2: Run the focused tests and verify the existing policy fails**
+
+Run: `PYTHONPATH=engine/src /Users/nthnp/Developer/stockmarkethelper/engine/.venv/bin/python -m pytest engine/tests/test_ipc.py -q`
+
+Expected: source-prefixed compound model output passes, `Acquire AAPL.` passes,
+and the verified decision record is not server-rendered.
+
+- [ ] **Step 3: Implement closed filtering and record rendering**
+
+Replace `_is_historical_record` exception use with
+`_filter_actionable_sentences(answer)`. It must remove every model sentence
+with trade-action vocabulary (`buy`, `sell`, `hold`, `purchase`, `liquidate`,
+`acquire`, `accumulate`, `dump`, `invest`, `cover`, `open a position`, `close a
+position`), risk-control vocabulary (`stop loss`, `daily stop`, `kill switch`,
+`hedge`, `rebalance`, `position sizing`, `take profit`, `target`), advice
+framing, or prospective action framing. Do not flag descriptive `May`, `entry
+price`, or past-tense `rallied`/`broke out` merely because they contain a
+substring.
+
+Add `_recorded_decision_sentences(decisions)` that returns only exact strings:
+
+```python
+f"Engine decision log recorded {decision.decision.value.upper()} {decision.ticker} on {decision.timestamp.date().isoformat()}."
+```
+
+Add `_question_requests_recorded_decisions(question)` matching whole words
+`decision`, `decisions`, `trade`, `trades`, or `action`. In `/api/chat`, append
+the rendered record strings only when this helper returns true. Never append a
+risk-control statement because SharedState has no recorded risk-control event
+collection. If filtering and allowed rendered records both yield no content,
+return `_SAFE_READ_ONLY_LIMITATION` with the disclosure.
+
+- [ ] **Step 4: Run focused and full engine tests**
+
+Run:
+
+```bash
+PYTHONPATH=engine/src /Users/nthnp/Developer/stockmarkethelper/engine/.venv/bin/python -m pytest engine/tests/test_ipc.py -q
+PYTHONPATH=engine/src /Users/nthnp/Developer/stockmarkethelper/engine/.venv/bin/python -m pytest engine/tests -q
+```
+
+Expected: all tests pass; model action language is never an exception and only
+server-created decision records contain BUY/SELL/HOLD wording.
+
+- [ ] **Step 5: Commit the closed policy**
+
+```bash
+git add engine/src/autotrader/ipc.py engine/tests/test_ipc.py
+git commit -m "fix: render verified historical decisions"
+```
