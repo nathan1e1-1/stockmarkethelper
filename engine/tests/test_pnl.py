@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from autotrader.models import ClosedTrade, Equity, Position
-from autotrader.pnl import build_pnl_snapshot
+from autotrader.pnl import build_pnl_snapshot, enrich_pnl_snapshot
 from autotrader.main import publish_pnl_attribution, restore_same_day_state
 from autotrader.state import State, StateStore
 
@@ -47,6 +47,7 @@ def test_pnl_snapshot_separates_daily_realized_and_unrealized_contributors():
             "exit_price": 100,
             "realized_pnl": 10,
             "exit_reason": "take profit",
+            "closed_at": "2026-08-31T15:00:00+00:00",
         }
     ]
     assert snapshot["open_positions"] == [
@@ -59,6 +60,74 @@ def test_pnl_snapshot_separates_daily_realized_and_unrealized_contributors():
             "unrealized_pnl_pct": 10,
         }
     ]
+
+
+def test_enrich_pnl_snapshot_attaches_one_day_move_news_and_reconciliation_facts():
+    base = build_pnl_snapshot(
+        equity=Equity(equity=1_015, day_start_equity=1_000, peak_equity=1_020, day="2026-09-01"),
+        positions=[Position(ticker="AAPL", qty=2, avg_entry_price=100)],
+        prices={"AAPL": 110},
+        closed_trades=[
+            ClosedTrade(
+                ticker="MSFT",
+                qty=1,
+                entry_price=90,
+                exit_price=95,
+                realized_pnl=5,
+                exit_reason="recorded exit",
+                closed_at=datetime(2026, 9, 1, 15, tzinfo=timezone.utc),
+            )
+        ],
+    )
+
+    snapshot = enrich_pnl_snapshot(
+        base,
+        bars_by_ticker={
+            "AAPL": [
+                {"open": 100.0, "close": 103.0},
+                {"open": 103.0, "close": 105.0},
+            ]
+        },
+        news_by_ticker={
+            "AAPL": [
+                {
+                    "headline": "AAPL headline",
+                    "summary": "Verified summary",
+                    "created_at": "2026-09-01T14:00:00+00:00",
+                    "source": "Newswire",
+                }
+            ]
+        },
+    )
+
+    assert snapshot["open_positions"][0]["day_open"] == 100.0
+    assert snapshot["open_positions"][0]["day_close"] == 105.0
+    assert snapshot["open_positions"][0]["day_change"] == 5.0
+    assert snapshot["open_positions"][0]["day_change_pct"] == 5.0
+    assert snapshot["realized_trades"][0]["closed_at"] == "2026-09-01T15:00:00+00:00"
+    assert snapshot["reconciliation_pnl"] == -10.0
+    assert snapshot["news_by_ticker"]["AAPL"][0]["headline"] == "AAPL headline"
+
+
+def test_enrich_pnl_snapshot_handles_malformed_bars_and_missing_news_without_exception():
+    base = build_pnl_snapshot(
+        equity=Equity(equity=1_000, day_start_equity=1_000, peak_equity=1_000, day="2026-09-01"),
+        positions=[Position(ticker="AAPL", qty=2, avg_entry_price=100)],
+        prices={"AAPL": 110},
+        closed_trades=[],
+    )
+
+    snapshot = enrich_pnl_snapshot(
+        base,
+        bars_by_ticker={"AAPL": [{"high": 110.0}, "not-a-bar", {"close": 105.0}]},
+        news_by_ticker={},
+    )
+
+    assert snapshot["open_positions"][0]["day_open"] is None
+    assert snapshot["open_positions"][0]["day_close"] is None
+    assert snapshot["open_positions"][0]["day_change"] is None
+    assert snapshot["open_positions"][0]["day_change_pct"] is None
+    assert snapshot["news_by_ticker"]["AAPL"] == []
 
 
 def test_pnl_snapshot_marks_missing_price_unavailable_without_losing_other_contributors():
