@@ -47,7 +47,7 @@ def test_state_roundtrips_decision_timestamp(tmp_path):
     assert loaded.decisions[0].timestamp == timestamp
 
 
-def test_load_legacy_decision_without_timestamp_uses_timezone_aware_now(tmp_path):
+def test_load_legacy_decision_without_timestamp_preserves_missing_timestamp(tmp_path):
     store = StateStore(tmp_path)
     store.path.write_text(json.dumps({"decisions": [{
         "ticker": "AAPL",
@@ -57,8 +57,7 @@ def test_load_legacy_decision_without_timestamp_uses_timezone_aware_now(tmp_path
     }]}))
 
     loaded = store.load()
-    assert loaded.decisions[0].timestamp.tzinfo is not None
-    assert loaded.decisions[0].timestamp.utcoffset() is not None
+    assert loaded.decisions[0].timestamp is None
 
 
 def test_state_roundtrips_closed_trades(tmp_path):

@@ -41,7 +41,7 @@ class AgentDecision:
     rationale: str
     confidence: float
     signals: SignalSet | None = None
-    timestamp: datetime = field(default_factory=_now)
+    timestamp: datetime | None = field(default_factory=_now)
 
 
 @dataclass

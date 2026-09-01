@@ -8,6 +8,7 @@ from autotrader.ipc import (
     _INFORMATIONAL_DISCLAIMER,
     _SAFE_READ_ONLY_LIMITATION,
     _chat_context,
+    _recorded_decision_sentences,
     create_app,
     SharedState,
 )
@@ -371,6 +372,22 @@ def test_chat_context_identifies_recorded_decision_source_and_timestamp(state_wi
     ]
 
 
+def test_chat_context_and_rendering_omit_legacy_decision_without_timestamp():
+    state = SharedState()
+    state.decisions = [
+        AgentDecision(
+            ticker="AAPL",
+            decision=Decision.BUY,
+            rationale="legacy",
+            confidence=0.4,
+            timestamp=None,
+        )
+    ]
+
+    assert _chat_context(state)["decisions"] == []
+    assert _recorded_decision_sentences(state.decisions) == []
+
+
 def test_create_app_has_no_executor_dependency():
     assert "executor" not in create_app.__code__.co_varnames
 
@@ -435,7 +452,7 @@ def test_chat_endpoint_rejects_non_json_model_prose(raw_output):
     assert response.json()["detail"] == "Assistant is temporarily unavailable. Please try again shortly."
 
 
-def test_chat_endpoint_ignores_unknown_selected_topic():
+def test_chat_endpoint_returns_503_when_selector_contains_unknown_topic():
     class FakeLLM:
         def complete(self, prompt):
             return '{"topics": ["unknown", "positions", "unknown"]}'
@@ -443,14 +460,11 @@ def test_chat_endpoint_ignores_unknown_selected_topic():
     state = SharedState()
     state.positions = [Position(ticker="AAPL", qty=3, avg_entry_price=190.0)]
     response = TestClient(create_app(state, llm=FakeLLM())).post("/api/chat", json={"question": "Show positions"})
-    assert response.status_code == 200
-    assert response.json() == {
-        "answer": "Position AAPL: quantity 3, average entry price $190.00.",
-        "disclaimer": _INFORMATIONAL_DISCLAIMER,
-    }
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Assistant is temporarily unavailable. Please try again shortly."
 
 
-@pytest.mark.parametrize("selector", ['{"topics": []}', '{"topics": ["not-a-topic"]}', '{"topics": ["pnl"]}'])
+@pytest.mark.parametrize("selector", ['{"topics": []}', '{"topics": ["pnl"]}'])
 def test_chat_endpoint_returns_safe_limitation_when_no_selected_topic_can_render(selector):
     class FakeLLM:
         def complete(self, prompt):
@@ -500,3 +514,101 @@ def test_chat_endpoint_renders_positions_only_from_ticker_quantity_and_average_e
     answer = TestClient(create_app(state, llm=FakeLLM())).post("/api/chat", json={"question": "Positions?"}).json()["answer"]
     assert answer == "Position AAPL: quantity 3.5, average entry price $190.25."
     assert "2025" not in answer
+
+
+def test_chat_endpoint_renders_market_session_from_engine_schedule(monkeypatch):
+    observed = []
+
+    def fake_is_market_open(now):
+        observed.append(now)
+        return True
+
+    monkeypatch.setattr("autotrader.ipc.is_market_open", fake_is_market_open, raising=False)
+
+    class FakeLLM:
+        def complete(self, prompt):
+            return '{"topics": ["market_session"]}'
+
+    response = TestClient(create_app(SharedState(), llm=FakeLLM())).post(
+        "/api/chat", json={"question": "Is the market open?"}
+    )
+
+    assert response.json()["answer"] == "Market session is open."
+    assert len(observed) == 1
+    assert observed[0].tzinfo is timezone.utc
+
+
+def test_chat_endpoint_renders_final_one_day_bar_for_question_ticker():
+    class FakeProvider:
+        def __init__(self):
+            self.calls = []
+
+        def bars(self, ticker, history_range=HistoryRange.ONE_DAY):
+            self.calls.append((ticker, history_range))
+            return [
+                {"t": "2026-08-31T14:29:00+00:00", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "volume": 1000.0},
+                {"t": "2026-08-31T14:30:00+00:00", "open": 100.5, "high": 102.0, "low": 100.0, "close": 101.5, "volume": 1200.0},
+            ]
+
+    class FakeLLM:
+        def complete(self, prompt):
+            return '{"topics": ["bars"]}'
+
+    provider = FakeProvider()
+    response = TestClient(create_app(SharedState(), provider=provider, llm=FakeLLM())).post(
+        "/api/chat", json={"question": "What is the latest AAPL bar?"}
+    )
+
+    assert response.json()["answer"] == (
+        "Latest AAPL bar at 2026-08-31T14:30:00+00:00: "
+        "O 100.50, H 102.00, L 100.00, C 101.50, volume 1200."
+    )
+    assert provider.calls == [("AAPL", HistoryRange.ONE_DAY)]
+
+
+@pytest.mark.parametrize("question", ["What is the latest bar?", "What is the latest aapl bar?"])
+def test_chat_endpoint_omits_bar_when_question_has_no_uppercase_ticker(question):
+    class FakeProvider:
+        def bars(self, ticker, history_range=HistoryRange.ONE_DAY):
+            pytest.fail("provider must not be called without an uppercase ticker")
+
+    class FakeLLM:
+        def complete(self, prompt):
+            return '{"topics": ["bars"]}'
+
+    response = TestClient(create_app(SharedState(), provider=FakeProvider(), llm=FakeLLM())).post(
+        "/api/chat", json={"question": question}
+    )
+
+    assert response.json()["answer"] == _SAFE_READ_ONLY_LIMITATION
+
+
+@pytest.mark.parametrize("result", [[], RuntimeError("provider unavailable")])
+def test_chat_endpoint_omits_bar_when_provider_has_no_usable_bar(result):
+    class FakeProvider:
+        def bars(self, ticker, history_range=HistoryRange.ONE_DAY):
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+    class FakeLLM:
+        def complete(self, prompt):
+            return '{"topics": ["bars"]}'
+
+    response = TestClient(create_app(SharedState(), provider=FakeProvider(), llm=FakeLLM())).post(
+        "/api/chat", json={"question": "What is the latest AAPL bar?"}
+    )
+
+    assert response.json()["answer"] == _SAFE_READ_ONLY_LIMITATION
+
+
+def test_chat_endpoint_omits_bar_without_provider():
+    class FakeLLM:
+        def complete(self, prompt):
+            return '{"topics": ["bars"]}'
+
+    response = TestClient(create_app(SharedState(), llm=FakeLLM())).post(
+        "/api/chat", json={"question": "What is the latest AAPL bar?"}
+    )
+
+    assert response.json()["answer"] == _SAFE_READ_ONLY_LIMITATION

@@ -29,14 +29,13 @@ def _decode_decision(d: dict) -> AgentDecision:
             composite=ss["composite"],
             regime=ss["regime"],
         )
-    kwargs = {"timestamp": timestamp} if timestamp is not None else {}
     return AgentDecision(
         ticker=d["ticker"],
         decision=decision,
         rationale=d.get("rationale", ""),
         confidence=d.get("confidence", 0.0),
         signals=signals,
-        **kwargs,
+        timestamp=timestamp,
     )
 
 
