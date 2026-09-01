@@ -556,7 +556,7 @@ def test_chat_endpoint_renders_final_one_day_bar_for_question_ticker():
 
     provider = FakeProvider()
     response = TestClient(create_app(SharedState(), provider=provider, llm=FakeLLM())).post(
-        "/api/chat", json={"question": "What is the latest AAPL bar?"}
+        "/api/chat", json={"question": "I want the latest AAPL bar."}
     )
 
     assert response.json()["answer"] == (

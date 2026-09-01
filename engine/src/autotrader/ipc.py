@@ -156,7 +156,10 @@ def _render_chat_topics(state: SharedState, topics: list[str], question: str, pr
             is_open = is_market_open(datetime.now(timezone.utc))
             sentences.append("Market session is open." if is_open else "Market session is closed.")
         elif topic == "bars":
-            ticker_match = _QUESTION_TICKER.search(question)
+            ticker_match = next(
+                (match for match in _QUESTION_TICKER.finditer(question) if match.group() != "I"),
+                None,
+            )
             if provider is None or ticker_match is None:
                 continue
             try:
