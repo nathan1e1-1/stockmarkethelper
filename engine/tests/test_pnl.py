@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from autotrader.models import ClosedTrade, Equity, Position
+from autotrader.history import HistoryRange
 from autotrader.pnl import build_pnl_snapshot, enrich_pnl_snapshot
 from autotrader.main import publish_pnl_attribution, restore_same_day_state
 from autotrader.state import State, StateStore
@@ -232,6 +233,129 @@ def test_publish_pnl_attribution_keeps_other_positions_when_a_price_lookup_fails
     assert shared.pnl_attribution["unrealized_pnl"] == 20
     assert shared.pnl_attribution["open_positions"][1]["ticker"] == "MSFT"
     assert shared.pnl_attribution["open_positions"][1]["current_price"] is None
+
+
+def test_publish_pnl_attribution_includes_one_day_move_news_and_reconciliation():
+    class FakeProvider:
+        def latest_price(self, ticker):
+            return {"AAPL": 110, "MSFT": 95}[ticker]
+
+        def bars(self, ticker, history_range):
+            assert history_range is HistoryRange.ONE_DAY
+            return [{"open": 100.0, "close": 103.0}, {"open": 103.0, "close": 105.0}]
+
+        def news(self, ticker, limit):
+            assert limit == 2
+            return [{"headline": f"{ticker} headline", "source": "Newswire"}]
+
+    class FakeSharedState:
+        pnl_attribution = None
+
+    shared = FakeSharedState()
+    publish_pnl_attribution(
+        shared=shared,
+        provider=FakeProvider(),
+        equity=Equity(equity=1_015, day_start_equity=1_000, peak_equity=1_020, day="2026-09-01"),
+        positions=[Position(ticker="AAPL", qty=2, avg_entry_price=100)],
+        closed_trades=[
+            ClosedTrade(
+                ticker="MSFT",
+                qty=1,
+                entry_price=90,
+                exit_price=95,
+                realized_pnl=5,
+                exit_reason="recorded exit",
+                closed_at=datetime(2026, 9, 1, 15, tzinfo=timezone.utc),
+            )
+        ],
+    )
+
+    assert shared.pnl_attribution["open_positions"][0]["day_change"] == 5.0
+    assert shared.pnl_attribution["news_by_ticker"]["AAPL"][0]["headline"] == "AAPL headline"
+    assert shared.pnl_attribution["reconciliation_pnl"] == -10.0
+
+
+def test_publish_pnl_attribution_isolates_partial_context_failures():
+    class FakeProvider:
+        def latest_price(self, ticker):
+            return {"AAPL": 110, "MSFT": 210}[ticker]
+
+        def bars(self, ticker, history_range):
+            if ticker == "MSFT":
+                raise RuntimeError("bars unavailable")
+            return [{"open": 100.0, "close": 105.0}]
+
+        def news(self, ticker, limit):
+            if ticker == "MSFT":
+                raise RuntimeError("news unavailable")
+            return [{"headline": "AAPL headline"}]
+
+    class FakeSharedState:
+        pnl_attribution = None
+
+    shared = FakeSharedState()
+    publish_pnl_attribution(
+        shared=shared,
+        provider=FakeProvider(),
+        equity=Equity(equity=1_000, day_start_equity=1_000, peak_equity=1_000, day="2026-09-01"),
+        positions=[
+            Position(ticker="AAPL", qty=2, avg_entry_price=100),
+            Position(ticker="MSFT", qty=1, avg_entry_price=200),
+        ],
+        closed_trades=[],
+    )
+
+    positions = {record["ticker"]: record for record in shared.pnl_attribution["open_positions"]}
+    assert positions["AAPL"]["day_change"] == 5.0
+    assert positions["MSFT"]["day_open"] is None
+    assert positions["MSFT"]["day_close"] is None
+    assert shared.pnl_attribution["news_by_ticker"]["AAPL"][0]["headline"] == "AAPL headline"
+    assert shared.pnl_attribution["news_by_ticker"]["MSFT"] == []
+
+
+def test_publish_pnl_attribution_requests_news_but_not_bars_for_closed_only_tickers():
+    class FakeProvider:
+        def __init__(self):
+            self.bars_calls = []
+            self.news_calls = []
+
+        def latest_price(self, ticker):
+            raise AssertionError("closed-only tickers have no latest-price lookup")
+
+        def bars(self, ticker, history_range):
+            self.bars_calls.append((ticker, history_range))
+            return []
+
+        def news(self, ticker, limit):
+            self.news_calls.append((ticker, limit))
+            return [{"headline": "MSFT headline"}]
+
+    class FakeSharedState:
+        pnl_attribution = None
+
+    provider = FakeProvider()
+    shared = FakeSharedState()
+    publish_pnl_attribution(
+        shared=shared,
+        provider=provider,
+        equity=Equity(equity=1_005, day_start_equity=1_000, peak_equity=1_005, day="2026-09-01"),
+        positions=[],
+        closed_trades=[
+            ClosedTrade(
+                ticker="MSFT",
+                qty=1,
+                entry_price=90,
+                exit_price=95,
+                realized_pnl=5,
+                exit_reason="recorded exit",
+                closed_at=datetime(2026, 9, 1, 15, tzinfo=timezone.utc),
+            )
+        ],
+    )
+
+    assert provider.bars_calls == []
+    assert provider.news_calls == [("MSFT", 2)]
+    assert shared.pnl_attribution["news_by_ticker"]["MSFT"][0]["headline"] == "MSFT headline"
 
 
 def test_same_day_restart_restores_journalled_closed_trades_before_publishing_pnl_attribution(tmp_path):
