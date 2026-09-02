@@ -1,7 +1,7 @@
 import argparse
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 import uvicorn
 
@@ -10,6 +10,7 @@ from autotrader.config import load_config
 from autotrader.execution import AlpacaExecutor
 from autotrader.history import HistoryRange
 from autotrader.ipc import SharedState, create_app
+from autotrader.lifecycle import EngineLifecycle
 from autotrader.market import EASTERN, is_after_close, is_market_open
 from autotrader.models import Equity
 from autotrader.pnl import build_pnl_snapshot, enrich_pnl_snapshot
@@ -70,11 +71,20 @@ def restore_same_day_state(loaded: State, day: str, runner, risk) -> bool:
     return True
 
 
-def main() -> None:
+def _parse_args(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="config/config.yaml")
     parser.add_argument("--once", action="store_true", help="Run a single scan and exit")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--rearm",
+        action="store_true",
+        help="Locally re-arm a fully reconciled paper engine for the current session, then exit",
+    )
+    return parser.parse_args(argv)
+
+
+def main() -> None:
+    args = _parse_args()
 
     cfg = load_config(args.config)
     provider = AlpacaProvider(cfg)
@@ -84,7 +94,19 @@ def main() -> None:
     store = StateStore("state")
     shared = SharedState()
 
-    runner = Runner(provider=provider, agent=agent, executor=executor, risk=risk, cfg=cfg, sentiment_llm=agent)
+    runner = Runner(
+        provider=provider,
+        agent=agent,
+        executor=executor,
+        risk=risk,
+        cfg=cfg,
+        sentiment_llm=agent,
+        state_store=store,
+        clock=lambda: datetime.now(timezone.utc),
+    )
+    lifecycle = EngineLifecycle(
+        cfg, executor, risk, runner, store, clock=lambda: datetime.now(timezone.utc)
+    )
 
     app = create_app(shared, provider=provider, llm=agent)
     if not args.once:
@@ -97,55 +119,40 @@ def main() -> None:
     universe = build_universe(provider, size=cfg.universe_size, min_price=cfg.min_price, min_volume=cfg.min_volume, tickers_only=True)
     print(f"Universe: {universe}")
 
-    equity = executor.get_equity()
-    risk.day_start_equity = equity
-    risk.peak_equity = equity
-
     startup_day = datetime.now(EASTERN).strftime("%Y-%m-%d")
-    loaded = store.load()
     current_day = None
-    if restore_same_day_state(loaded, startup_day, runner, risk):
-        current_day = startup_day
-        print(f"[reload] restored {len(runner.decisions)} decisions, {len(runner.closed_trades)} closed trades")
+    reconciled = lifecycle.startup_reconcile()
+    if not reconciled:
+        print("[safety] startup reconciliation is incomplete; scanning is blocked")
+    if args.rearm:
+        if lifecycle.request_rearm(startup_day):
+            print("[safety] paper engine re-armed after clean local reconciliation")
+        else:
+            print("[safety] paper engine was not re-armed; it requires a new session and clean broker reconciliation")
+        return
 
     # Publish initial state so the UI shows account data immediately, even outside market hours.
-    runner.equity = Equity(
-        equity=equity,
+    initial_equity = runner.equity.equity if runner.equity is not None else cfg.paper_capital
+    runner.equity = runner.equity or Equity(
+        equity=initial_equity,
         day_start_equity=risk.day_start_equity,
         peak_equity=risk.peak_equity,
         day=startup_day,
     )
     shared.equity = runner.equity
-    shared.positions = executor.positions()
+    shared.positions = list(risk.positions)
     shared.risk = risk
     publish_pnl_attribution(shared, provider, runner.equity, shared.positions, runner.closed_trades)
 
-    flatten_time = datetime.strptime(cfg.flatten_time, "%H:%M").time() if cfg.flatten_at_close else None
-    reconciled = False
-
     def sync_and_scan(day: str) -> None:
-        nonlocal reconciled
-        if not args.once and not reconciled:
-            runner.reconcile()
-            reconciled = True
-        equity = executor.get_equity()
-        risk.peak_equity = max(risk.peak_equity, equity)
-        risk.positions = executor.positions()
-        runner.equity = Equity(
-            equity=equity,
-            day_start_equity=risk.day_start_equity,
-            peak_equity=risk.peak_equity,
-            day=day,
-        )
-        runner.manage_exits(flatten_time=flatten_time, now=datetime.now(EASTERN))
-        runner.run_once(universe)
+        lifecycle.tick(datetime.now(timezone.utc), universe)
+        equity = runner.equity.equity if runner.equity is not None else initial_equity
         shared.equity = runner.equity
-        shared.positions = executor.positions()
+        shared.positions = list(risk.positions)
         publish_pnl_attribution(shared, provider, runner.equity, shared.positions, runner.closed_trades)
         shared.decisions = runner.decisions
         shared.risk = risk
         shared.equity_history.append({"t": time.time(), "equity": equity})
-        store.save(State(equity=runner.equity, positions=risk.positions, decisions=runner.decisions, closed_trades=runner.closed_trades))
 
     def generate_summary() -> None:
         unrealized = 0.0
@@ -177,16 +184,9 @@ def main() -> None:
             if day != current_day:
                 current_day = day
                 summary_done = False
-                reconciled = False
-                runner.decisions = []
-                runner.closed_trades = []
-                runner.flattened = False
                 shared.equity_history = []
                 universe[:] = build_universe(provider, size=cfg.universe_size, min_price=cfg.min_price, min_volume=cfg.min_volume, tickers_only=True)
                 print(f"Universe: {universe}")
-                equity = executor.get_equity()
-                risk.day_start_equity = equity
-                risk.peak_equity = max(risk.peak_equity, equity)
 
             if is_market_open(now):
                 sync_and_scan(day)

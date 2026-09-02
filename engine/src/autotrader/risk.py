@@ -5,7 +5,7 @@ from functools import wraps
 from threading import RLock
 from typing import Callable
 
-from autotrader.models import Position, Reservation, RiskState
+from autotrader.models import Order, Position, Reservation, RiskState, Side
 
 
 @dataclass(frozen=True)
@@ -108,6 +108,99 @@ class RiskManager:
                 and not self._has_ticker(ticker)
                 and self._position_count() < self.cfg.max_positions
             )
+
+    @_synchronized
+    def restore_persisted_safety_state(
+        self,
+        *,
+        positions,
+        reservations,
+        pending_orders,
+        risk_state,
+        halt_reason,
+        session_id,
+        session_entry_count,
+        cutoff_latched,
+    ) -> bool:
+        """Atomically hydrate validated risk bookkeeping from durable state."""
+        if (
+            risk_state not in RiskState
+            or not self._valid_session_id(session_id)
+            or not isinstance(session_entry_count, int)
+            or isinstance(session_entry_count, bool)
+            or session_entry_count < 0
+            or not isinstance(cutoff_latched, bool)
+            or (halt_reason is not None and type(halt_reason) is not str)
+            or not isinstance(positions, list)
+            or not isinstance(reservations, list)
+            or not isinstance(pending_orders, list)
+        ):
+            return False
+        if not all(
+            isinstance(position, Position)
+            and self._valid_ticker(position.ticker)
+            and self._positive(position.qty)
+            and self._positive(position.avg_entry_price)
+            for position in positions
+        ):
+            return False
+        if len({position.ticker for position in positions}) != len(positions):
+            return False
+        if not all(
+            isinstance(reservation, Reservation)
+            and self._valid_client_order_id(reservation.client_order_id)
+            and self._valid_ticker(reservation.ticker)
+            and self._positive(reservation.qty)
+            and self._positive(reservation.limit_price)
+            and self._timestamp_reason(reservation.created_at) is None
+            for reservation in reservations
+        ):
+            return False
+        reservation_map = {reservation.client_order_id: reservation for reservation in reservations}
+        if len(reservation_map) != len(reservations):
+            return False
+        pending_entries: dict[str, _PendingEntry] = {}
+        acknowledged_entries: dict[str, str] = {}
+        for order in pending_orders:
+            if not isinstance(order, Order) or order.side not in Side:
+                return False
+            if not (
+                self._valid_broker_order_id(order.id)
+                and self._valid_client_order_id(order.client_order_id)
+                and self._valid_ticker(order.ticker)
+                and self._positive(order.qty)
+                and self._nonnegative(order.processed_filled_qty)
+                and self._nonnegative(order.processed_filled_notional)
+            ):
+                return False
+            if order.side is not Side.BUY:
+                continue
+            reservation = reservation_map.get(order.client_order_id)
+            if reservation is None or reservation.ticker != order.ticker:
+                return False
+            if order.id == order.client_order_id:
+                continue
+            if order.id in pending_entries or order.client_order_id in acknowledged_entries:
+                return False
+            pending_entries[order.id] = _PendingEntry(
+                order.client_order_id, order.processed_filled_qty, order.processed_filled_notional
+            )
+            acknowledged_entries[order.client_order_id] = order.id
+        if session_entry_count < len(acknowledged_entries):
+            return False
+        self.positions = list(positions)
+        self.reservations = reservation_map
+        self._pending_entries = pending_entries
+        self._acknowledged_entries = acknowledged_entries
+        self._completed_entries.clear()
+        self._released_entries.clear()
+        self._released_reservations.clear()
+        self.state = risk_state
+        self.halt_reason = halt_reason
+        self.session_id = session_id
+        self.session_entry_count = session_entry_count
+        self.cutoff_latched = cutoff_latched
+        return True
 
     def reserve_entry(
         self,

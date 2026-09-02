@@ -5,7 +5,7 @@ from threading import Event, Lock, Thread
 
 import pytest
 
-from autotrader.models import Position, RiskState
+from autotrader.models import Order, Position, Reservation, RiskState, Side
 from autotrader.risk import RiskManager
 
 
@@ -91,6 +91,29 @@ def test_position_size_uses_initial_paper_position_cap():
     rm = RiskManager(InitialPaperCfg())
 
     assert rm.position_size("AAPL", price=100.0, equity=100_000.0) == 2
+
+
+def test_restore_persisted_safety_state_rebuilds_pending_buy_tracking_without_private_access(now):
+    rm = RiskManager(InitialPaperCfg(), clock=lambda: now, session_id="2026-09-01")
+    reservation = Reservation("entry-2026-09-01-AAPL", "AAPL", 2.0, 100.0, now)
+    pending = Order(
+        "broker-1", "AAPL", Side.BUY, 2.0, status="accepted",
+        client_order_id=reservation.client_order_id, timestamp=now, observed_at=now,
+        filled_qty=0.0, filled_notional=0.0,
+    )
+
+    assert rm.restore_persisted_safety_state(
+        positions=[],
+        reservations=[reservation],
+        pending_orders=[pending],
+        risk_state=RiskState.ACTIVE,
+        halt_reason=None,
+        session_id="2026-09-01",
+        session_entry_count=1,
+        cutoff_latched=False,
+    ) is True
+    assert rm.apply_terminal_order("broker-1", "rejected", 0.0, 0.0) is True
+    assert rm.reservations == {}
 
 
 def test_hostile_session_id_is_halted_before_entry_reservation(now):
