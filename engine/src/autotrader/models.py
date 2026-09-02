@@ -92,6 +92,18 @@ class Position:
     opened_at: datetime = field(default_factory=_now)
 
 
+@dataclass(frozen=True)
+class AccountSnapshot:
+    equity: float | None
+    observed_at: datetime
+
+
+@dataclass(frozen=True)
+class PositionsSnapshot:
+    positions: list[Position] | None
+    observed_at: datetime
+
+
 @dataclass
 class ClosedTrade:
     ticker: str

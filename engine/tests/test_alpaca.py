@@ -1,15 +1,41 @@
 from autotrader.providers.fixtures import FixtureProvider
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from alpaca.data.timeframe import TimeFrameUnit
 
 from autotrader.history import HistoryRange
 from autotrader.providers.alpaca import AlpacaProvider
+from autotrader.models import Quote
+
+
+SOURCE_TIME = datetime(2026, 9, 1, 14, 30, tzinfo=timezone.utc)
+OBSERVED_TIME = datetime(2026, 9, 1, 14, 31, tzinfo=timezone.utc)
 
 
 def test_fixture_provider_latest_price():
     p = FixtureProvider()
     assert p.latest_price("AAPL") == 190.0
+
+
+def test_fixture_provider_latest_quote_is_deterministic():
+    assert FixtureProvider().latest_quote("AAPL") == Quote(
+        "AAPL",
+        190.0,
+        datetime(2026, 8, 30, tzinfo=timezone.utc),
+        datetime(2026, 8, 30, tzinfo=timezone.utc),
+    )
+
+
+def test_fixture_provider_uses_injected_time_for_fresh_quote():
+    assert FixtureProvider().latest_quote("AAPL", now=OBSERVED_TIME) == Quote(
+        "AAPL", 190.0, OBSERVED_TIME, OBSERVED_TIME
+    )
+
+
+def test_fixture_provider_rejects_naive_injected_time():
+    with pytest.raises(ValueError, match="invalid quote timestamp"):
+        FixtureProvider().latest_quote("AAPL", now=datetime(2026, 9, 1, 14, 31))
 
 
 def test_fixture_provider_bars_length():
@@ -98,6 +124,22 @@ class FakeDataClient:
         return {"AAPL": self.bars}
 
 
+class FakeTrade:
+    def __init__(self, price, timestamp):
+        self.price = price
+        self.timestamp = timestamp
+
+
+class FakeLatestTradeDataClient:
+    def __init__(self, trade):
+        self.trade = trade
+        self.requests = []
+
+    def get_stock_latest_trade(self, request):
+        self.requests.append(request)
+        return {"AAPL": self.trade}
+
+
 class FakeNewsArticle:
     def __init__(self, headline, summary, created_at, source):
         self.headline = headline
@@ -123,6 +165,47 @@ def provider_with(data=None, trading=None, news=None):
     provider._news = news
     provider._asset_search_cache = None
     return provider
+
+
+def test_latest_quote_preserves_source_and_observation_time():
+    provider = provider_with(data=FakeLatestTradeDataClient(FakeTrade(190.0, SOURCE_TIME)))
+
+    assert provider.latest_quote("AAPL", now=OBSERVED_TIME) == Quote(
+        "AAPL", 190.0, SOURCE_TIME, OBSERVED_TIME
+    )
+
+
+def test_latest_price_remains_a_compatibility_wrapper():
+    provider = provider_with(data=FakeLatestTradeDataClient(FakeTrade(190.0, SOURCE_TIME)))
+
+    assert provider.latest_price("AAPL") == 190.0
+
+
+def test_latest_quote_rejects_naive_injected_time():
+    provider = provider_with(data=FakeLatestTradeDataClient(FakeTrade(190.0, SOURCE_TIME)))
+
+    with pytest.raises(ValueError, match="invalid quote timestamp"):
+        provider.latest_quote("AAPL", now=datetime(2026, 9, 1, 14, 31))
+
+
+@pytest.mark.parametrize(
+    ("price", "source_timestamp"),
+    [
+        (0.0, SOURCE_TIME),
+        (-1.0, SOURCE_TIME),
+        (float("nan"), SOURCE_TIME),
+        (190.0, None),
+        (190.0, datetime(2026, 9, 1, 14, 30)),
+    ],
+)
+def test_latest_quote_fails_closed_for_invalid_broker_data(price, source_timestamp):
+    provider = provider_with(data=FakeLatestTradeDataClient(FakeTrade(price, source_timestamp)))
+
+    with pytest.raises(ValueError, match="invalid quote"):
+        provider.latest_quote("AAPL", now=OBSERVED_TIME)
+
+    with pytest.raises(ValueError, match="invalid quote"):
+        provider.latest_price("AAPL")
 
 
 def test_search_assets_filters_tradable_active_equities_and_caches_result():
