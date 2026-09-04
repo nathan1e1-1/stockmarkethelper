@@ -35,6 +35,27 @@ final class TradingAgentAppTests: XCTestCase {
         XCTAssertEqual(response.disclaimer, "For informational purposes only — not investment advice. Use your own judgment.")
     }
 
+    func testChatResponseDecodesStructuredSections() throws {
+        let data = #"{"answer":"Net P&L is up $1,200 today.","disclaimer":"For informational purposes only.","headline":"Net P&L is up $1,200 today.","key_points":["Apple gained $800","Tesla lost $200"],"details":["AAPL: +$800 from 100 shares","TSLA: -$200 from 50 shares"]}"#.data(using: .utf8)!
+
+        let response = try JSONDecoder().decode(ChatResponse.self, from: data)
+
+        XCTAssertEqual(response.headline, "Net P&L is up $1,200 today.")
+        XCTAssertEqual(response.keyPoints, ["Apple gained $800", "Tesla lost $200"])
+        XCTAssertEqual(response.details, ["AAPL: +$800 from 100 shares", "TSLA: -$200 from 50 shares"])
+    }
+
+    func testChatResponseDecodesLegacyWithoutStructuredSections() throws {
+        let data = #"{"answer":"Your account has no open positions."}"#.data(using: .utf8)!
+
+        let response = try JSONDecoder().decode(ChatResponse.self, from: data)
+
+        XCTAssertEqual(response.answer, "Your account has no open positions.")
+        XCTAssertNil(response.headline)
+        XCTAssertEqual(response.keyPoints, [])
+        XCTAssertEqual(response.details, [])
+    }
+
     func testChatValidationDetailsProduceActionableQuestionMessage() {
         let arrayDetail = #"{"detail":[{"type":"string_too_short","loc":["body","question"],"msg":"String should have at least 1 character"}]}"#.data(using: .utf8)!
         let objectDetail = #"{"detail":{"type":"string_too_short","loc":["body","question"],"msg":"String should have at least 1 character"}}"#.data(using: .utf8)!

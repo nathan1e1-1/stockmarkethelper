@@ -31,16 +31,25 @@ struct ChatResponse: Codable {
 
     let answer: String
     let disclaimer: String
+    let headline: String?
+    let keyPoints: [String]
+    let details: [String]
 
     private enum CodingKeys: String, CodingKey {
         case answer
         case disclaimer
+        case headline
+        case keyPoints = "key_points"
+        case details
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         answer = try container.decode(String.self, forKey: .answer)
         disclaimer = try container.decodeIfPresent(String.self, forKey: .disclaimer) ?? Self.fallbackDisclaimer
+        headline = try container.decodeIfPresent(String.self, forKey: .headline)
+        keyPoints = try container.decodeIfPresent([String].self, forKey: .keyPoints) ?? []
+        details = try container.decodeIfPresent([String].self, forKey: .details) ?? []
     }
 }
 
