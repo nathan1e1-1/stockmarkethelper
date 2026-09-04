@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field, field_validator
 from autotrader.history import HistoryRange
 from autotrader.market import is_market_open
 from autotrader.models import Equity
-from autotrader.pnl_explanation import render_pnl_explanation
+from autotrader.pnl_explanation import render_pnl_explanation, render_pnl_explanation_structured
 
 _UNAVAILABLE_LLM_RESPONSE = "Daily summary unavailable."
 _INFORMATIONAL_DISCLAIMER = "For informational purposes only — not investment advice. Use your own judgment."
@@ -238,7 +238,7 @@ def create_app(state: SharedState, provider=None, llm=None) -> FastAPI:
             return {"bars": []}
 
     @app.post("/api/chat")
-    def chat(request: ChatRequest) -> dict[str, str]:
+    def chat(request: ChatRequest) -> dict[str, Any]:
         if llm is None:
             raise HTTPException(
                 status_code=503,
@@ -269,7 +269,15 @@ def create_app(state: SharedState, provider=None, llm=None) -> FastAPI:
             response_parts = _render_chat_topics(state, topics, request.question, provider)
             if not response_parts:
                 return {"answer": _SAFE_READ_ONLY_LIMITATION, "disclaimer": _INFORMATIONAL_DISCLAIMER}
-            return {"answer": " ".join(response_parts), "disclaimer": _INFORMATIONAL_DISCLAIMER}
+            response: dict[str, Any] = {
+                "answer": " ".join(response_parts),
+                "disclaimer": _INFORMATIONAL_DISCLAIMER,
+            }
+            if "pnl_explanation" in topics:
+                structured = render_pnl_explanation_structured(state.pnl_attribution)
+                if structured is not None:
+                    response.update(structured)
+            return response
         except Exception as error:
             raise HTTPException(
                 status_code=503,

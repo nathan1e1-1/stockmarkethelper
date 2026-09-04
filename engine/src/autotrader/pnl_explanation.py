@@ -127,8 +127,10 @@ def _trade_sentence(trade: Mapping[str, Any]) -> tuple[str | None, tuple[float, 
     return f"{ticker} recorded trade: {', '.join(details)}.", contributor
 
 
-def render_pnl_explanation(snapshot: Mapping[str, Any] | Any) -> str | None:
-    """Render only the supplied snapshot; never query providers or generate advice."""
+def _render_pnl_blocks(
+    snapshot: Mapping[str, Any] | Any,
+) -> tuple[str | None, list[str], list[str]] | None:
+    """Return (headline, key_points, details) for a snapshot, or None if unusable."""
     if not isinstance(snapshot, Mapping):
         return None
 
@@ -139,19 +141,21 @@ def render_pnl_explanation(snapshot: Mapping[str, Any] | Any) -> str | None:
     if daily_pnl is None and realized_pnl is None and unrealized_pnl is None:
         return None
 
-    sentences = []
+    headline: str | None = None
     if daily_pnl is not None:
         daily = f"Today's P&L is {_amount(daily_pnl)}"
         if daily_pct is not None:
             daily += f" ({_percent(daily_pct)})"
-        sentences.append(f"{daily}.")
+        headline = f"{daily}."
+
+    key_points: list[str] = []
     if realized_pnl is not None or unrealized_pnl is not None:
         realized = _amount(realized_pnl) if realized_pnl is not None else "unavailable"
         unrealized = _amount(unrealized_pnl) if unrealized_pnl is not None else "unavailable"
-        sentences.append(f"Realized P&L: {realized}; unrealized P&L: {unrealized}.")
+        key_points.append(f"Realized P&L: {realized}; unrealized P&L: {unrealized}.")
 
     contributors: list[tuple[float, str]] = []
-    details = []
+    details: list[str] = []
     for trade in _items(snapshot.get("realized_trades")):
         sentence, contributor = _trade_sentence(trade)
         if sentence is not None:
@@ -168,19 +172,45 @@ def render_pnl_explanation(snapshot: Mapping[str, Any] | Any) -> str | None:
     negative = min((item for item in contributors if item[0] < 0), default=None, key=lambda item: item[0])
     positive = max((item for item in contributors if item[0] > 0), default=None, key=lambda item: item[0])
     if negative is not None:
-        sentences.append(f"Largest negative contributor: {negative[1]} {_amount(negative[0])}.")
+        key_points.append(f"Largest negative contributor: {negative[1]} {_amount(negative[0])}.")
     if positive is not None:
-        sentences.append(f"Largest positive contributor: {positive[1]} {_amount(positive[0])}.")
+        key_points.append(f"Largest positive contributor: {positive[1]} {_amount(positive[0])}.")
     if not contributors:
-        sentences.append("No realized or open-position contributors are recorded in this snapshot.")
+        key_points.append("No realized or open-position contributors are recorded in this snapshot.")
 
     reconciliation = _number(snapshot.get("reconciliation_pnl"))
     if reconciliation is not None and abs(reconciliation) >= 0.01:
-        sentences.append(
+        key_points.append(
             "Reconciliation: daily P&L minus realized and unrealized P&L is "
             f"{_amount(reconciliation)}."
         )
-        sentences.append("The current ledger does not attribute this amount.")
+        key_points.append("The current ledger does not attribute this amount.")
 
-    sentences.extend(details)
-    return " ".join(sentences)
+    return headline, key_points, details
+
+
+def render_pnl_explanation(snapshot: Mapping[str, Any] | Any) -> str | None:
+    """Render only the supplied snapshot; never query providers or generate advice."""
+    blocks = _render_pnl_blocks(snapshot)
+    if blocks is None:
+        return None
+    headline, key_points, details = blocks
+    parts: list[str] = []
+    if headline is not None:
+        parts.append(headline)
+    parts.extend(key_points)
+    parts.extend(details)
+    return " ".join(parts)
+
+
+def render_pnl_explanation_structured(snapshot: Mapping[str, Any] | Any) -> dict | None:
+    """Render the supplied snapshot into display sections, or None if unusable."""
+    blocks = _render_pnl_blocks(snapshot)
+    if blocks is None:
+        return None
+    headline, key_points, details = blocks
+    return {
+        "headline": headline if headline is not None else "",
+        "key_points": key_points,
+        "details": details,
+    }
