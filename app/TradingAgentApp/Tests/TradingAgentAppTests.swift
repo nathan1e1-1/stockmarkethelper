@@ -35,6 +35,27 @@ final class TradingAgentAppTests: XCTestCase {
         XCTAssertEqual(response.disclaimer, "For informational purposes only — not investment advice. Use your own judgment.")
     }
 
+    func testChatResponseDecodesStructuredSections() throws {
+        let data = #"{"answer":"Net P&L is up $1,200 today.","disclaimer":"For informational purposes only.","headline":"Net P&L is up $1,200 today.","key_points":["Apple gained $800","Tesla lost $200"],"details":["AAPL: +$800 from 100 shares","TSLA: -$200 from 50 shares"]}"#.data(using: .utf8)!
+
+        let response = try JSONDecoder().decode(ChatResponse.self, from: data)
+
+        XCTAssertEqual(response.headline, "Net P&L is up $1,200 today.")
+        XCTAssertEqual(response.keyPoints, ["Apple gained $800", "Tesla lost $200"])
+        XCTAssertEqual(response.details, ["AAPL: +$800 from 100 shares", "TSLA: -$200 from 50 shares"])
+    }
+
+    func testChatResponseDecodesLegacyWithoutStructuredSections() throws {
+        let data = #"{"answer":"Your account has no open positions."}"#.data(using: .utf8)!
+
+        let response = try JSONDecoder().decode(ChatResponse.self, from: data)
+
+        XCTAssertEqual(response.answer, "Your account has no open positions.")
+        XCTAssertNil(response.headline)
+        XCTAssertEqual(response.keyPoints, [])
+        XCTAssertEqual(response.details, [])
+    }
+
     func testChatValidationDetailsProduceActionableQuestionMessage() {
         let arrayDetail = #"{"detail":[{"type":"string_too_short","loc":["body","question"],"msg":"String should have at least 1 character"}]}"#.data(using: .utf8)!
         let objectDetail = #"{"detail":{"type":"string_too_short","loc":["body","question"],"msg":"String should have at least 1 character"}}"#.data(using: .utf8)!
@@ -55,5 +76,56 @@ final class TradingAgentAppTests: XCTestCase {
         let second = EquityPoint(t: 1_300, equity: 100_200)
 
         XCTAssertEqual(nearestEquityPoint(to: Date(timeIntervalSince1970: 1_250), in: [first, second])?.id, second.id)
+    }
+
+    func testSummaryParserRecognizesLabelledSections() {
+        let raw = """
+        Day P&L:
+        +$1,240 net profit today.
+
+        Closed trades:
+        Sold APPL for +$800, TSLA for +$440.
+
+        Account details:
+        Ending equity is $102,340.
+        """
+
+        let sections = parseSummarySections(raw)
+
+        XCTAssertTrue(sections.isStructured)
+        XCTAssertEqual(sections.glance, ["+$1,240 net profit today."])
+        XCTAssertEqual(sections.activity, ["Sold APPL for +$800, TSLA for +$440."])
+        XCTAssertEqual(sections.details, ["Ending equity is $102,340."])
+    }
+
+    func testSummaryParserFallsBackToSingleDetailsCard() {
+        let raw = "The market was choppy today and nothing much happened worth reporting."
+
+        let sections = parseSummarySections(raw)
+
+        XCTAssertFalse(sections.isStructured)
+        XCTAssertEqual(sections.glance, [])
+        XCTAssertEqual(sections.activity, [])
+        XCTAssertEqual(sections.details, [raw])
+    }
+
+    func testSummaryParserIsCaseInsensitive() {
+        let raw = """
+        day p&l:
+        +$50 today.
+
+        CLOSED TRADES:
+        Sold MSFT.
+
+        ACCOUNT DETAILS:
+        Equity $50,000.
+        """
+
+        let sections = parseSummarySections(raw)
+
+        XCTAssertTrue(sections.isStructured)
+        XCTAssertEqual(sections.glance, ["+$50 today."])
+        XCTAssertEqual(sections.activity, ["Sold MSFT."])
+        XCTAssertEqual(sections.details, ["Equity $50,000."])
     }
 }

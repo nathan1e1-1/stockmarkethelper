@@ -34,15 +34,25 @@ struct SummaryView: View {
                     }
                     .entrance(delay: 0.08)
                 } else {
-                    SCard {
-                        Text(client.summary)
-                            .font(.body)
-                            .foregroundStyle(Color.foreground)
-                            .lineSpacing(5)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(20)
+                    let sections = parseSummarySections(client.summary)
+
+                    if sections.isStructured {
+                        if !sections.glance.isEmpty {
+                            summaryCard(title: "Today at a glance", lines: sections.glance)
+                                .entrance(delay: 0.08)
+                        }
+                        if !sections.activity.isEmpty {
+                            summaryCard(title: "Trading activity", lines: sections.activity)
+                                .entrance(delay: 0.16)
+                        }
+                        if !sections.details.isEmpty {
+                            summaryCard(title: "Account details", lines: sections.details)
+                                .entrance(delay: 0.24)
+                        }
+                    } else {
+                        summaryCard(title: "Account details", lines: sections.details)
+                            .entrance(delay: 0.08)
                     }
-                    .entrance(delay: 0.08)
                 }
             }
             .padding(24)
@@ -53,6 +63,24 @@ struct SummaryView: View {
         .task {
             client.start()
             await client.refresh()
+        }
+    }
+
+    @ViewBuilder
+    private func summaryCard(title: String, lines: [String]) -> some View {
+        SCard {
+            VStack(alignment: .leading, spacing: 8) {
+                SSectionLabel(text: title)
+                Text(lines.joined(separator: "\n"))
+                    .font(.body)
+                    .foregroundStyle(Color.foreground)
+                    .lineSpacing(5)
+                    .monospacedDigit()
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 4)
+            }
+            .padding(20)
         }
     }
 }

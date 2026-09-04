@@ -119,9 +119,8 @@ struct AITradeDeskView: View {
             Text(message.role == .user ? "You" : "AI analysis")
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(Color.mutedForeground)
-            Text(message.text)
-                .font(.callout)
-                .foregroundStyle(Color.foreground)
+
+            bubbleContent(message)
                 .textSelection(.enabled)
                 .padding(10)
                 .frame(maxWidth: .infinity, alignment: message.role == .user ? .trailing : .leading)
@@ -141,6 +140,60 @@ struct AITradeDeskView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: message.role == .user ? .trailing : .leading)
+    }
+
+    @ViewBuilder
+    private func bubbleContent(_ message: ChatMessage) -> some View {
+        if message.role == .assistant && (message.keyPoints.count > 0 || message.headline != nil) {
+            VStack(alignment: .leading, spacing: 8) {
+                if let headline = message.headline,
+                   !headline.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Text(headline)
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(Color.foreground)
+                }
+
+                if !message.keyPoints.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(message.keyPoints.indices, id: \.self) { index in
+                            HStack(alignment: .top, spacing: 8) {
+                                Text("•")
+                                    .font(.callout)
+                                    .foregroundStyle(Color.mutedForeground)
+                                Text(message.keyPoints[index])
+                                    .font(.callout)
+                                    .monospacedDigit()
+                                    .foregroundStyle(Color.foreground)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                    }
+                }
+
+                if !message.details.isEmpty {
+                    DisclosureGroup {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(message.details.indices, id: \.self) { index in
+                                Text(message.details[index])
+                                    .font(.callout)
+                                    .monospacedDigit()
+                                    .foregroundStyle(Color.mutedForeground)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                        .padding(.top, 6)
+                    } label: {
+                        Text("All details")
+                            .font(.callout.weight(.semibold))
+                            .foregroundStyle(Color.foreground)
+                    }
+                }
+            }
+        } else {
+            Text(message.text)
+                .font(.callout)
+                .foregroundStyle(Color.foreground)
+        }
     }
 
     private func errorCard(message: String) -> some View {
@@ -232,7 +285,10 @@ struct AITradeDeskView: View {
                     ChatMessage(
                         role: .assistant,
                         text: response.answer,
-                        disclaimer: response.disclaimer
+                        disclaimer: response.disclaimer,
+                        headline: response.headline,
+                        keyPoints: response.keyPoints,
+                        details: response.details
                     )
                 )
                 retryQuestion = nil
@@ -254,4 +310,7 @@ private struct ChatMessage: Identifiable {
     let role: Role
     let text: String
     let disclaimer: String?
+    var headline: String? = nil
+    var keyPoints: [String] = []
+    var details: [String] = []
 }
