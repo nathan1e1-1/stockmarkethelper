@@ -18,6 +18,12 @@ class Side(str, Enum):
     SELL = "sell"
 
 
+class RiskState(str, Enum):
+    ACTIVE = "active"
+    HALTING = "halting"
+    HALTED = "halted"
+
+
 @dataclass
 class Signal:
     name: str
@@ -53,6 +59,29 @@ class Order:
     filled_avg_price: float | None = None
     status: str = "submitted"
     timestamp: datetime = field(default_factory=_now)
+    client_order_id: str | None = None
+    filled_qty: float | None = None
+    filled_notional: float | None = None
+    processed_filled_qty: float = 0.0
+    processed_filled_notional: float = 0.0
+    observed_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class Quote:
+    ticker: str
+    price: float
+    source_timestamp: datetime
+    observed_at: datetime
+
+
+@dataclass
+class Reservation:
+    client_order_id: str
+    ticker: str
+    qty: float
+    limit_price: float
+    created_at: datetime
 
 
 @dataclass
@@ -61,6 +90,18 @@ class Position:
     qty: float
     avg_entry_price: float
     opened_at: datetime = field(default_factory=_now)
+
+
+@dataclass(frozen=True)
+class AccountSnapshot:
+    equity: float | None
+    observed_at: datetime
+
+
+@dataclass(frozen=True)
+class PositionsSnapshot:
+    positions: list[Position] | None
+    observed_at: datetime
 
 
 @dataclass

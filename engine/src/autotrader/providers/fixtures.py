@@ -3,13 +3,30 @@ from datetime import datetime, timedelta, timezone
 from alpaca.data.timeframe import TimeFrameUnit
 
 from autotrader.history import HistoryRange, HistoryRequest, thin_bars
+from autotrader.models import Quote
 
 
 class FixtureProvider:
     """Deterministic in-memory provider for tests and replay."""
 
+    _QUOTE_TIME = datetime(2026, 8, 30, tzinfo=timezone.utc)
+
+    def latest_quote(self, ticker: str, *, now: datetime | None = None) -> Quote:
+        timestamp = now or self._QUOTE_TIME
+        if not self._is_aware_datetime(timestamp):
+            raise ValueError("invalid quote timestamp")
+        return Quote(ticker, 190.0, timestamp, timestamp)
+
+    @staticmethod
+    def _is_aware_datetime(value) -> bool:
+        return (
+            isinstance(value, datetime)
+            and value.tzinfo is not None
+            and value.utcoffset() is not None
+        )
+
     def latest_price(self, ticker: str) -> float:
-        return 190.0
+        return self.latest_quote(ticker).price
 
     def latest_prices(self, tickers: list[str]) -> dict[str, float]:
         return {t: self.latest_price(t) for t in tickers}

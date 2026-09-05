@@ -13,6 +13,7 @@ from autotrader.ipc import (
     SharedState,
 )
 from autotrader.models import AgentDecision, Decision, Equity, Position
+from autotrader.pnl_explanation import render_pnl_explanation_structured
 
 
 @pytest.fixture
@@ -651,6 +652,12 @@ def test_chat_endpoint_renders_pnl_explanation_when_snapshot_has_no_contributors
 
     assert response.status_code == 200
     assert response.json() == {
+        "headline": "Today's P&L is $0.00 (0.00%).",
+        "key_points": [
+            "Realized P&L: $0.00; unrealized P&L: $0.00.",
+            "No realized or open-position contributors are recorded in this snapshot.",
+        ],
+        "details": [],
         "answer": (
             "Today's P&L is $0.00 (0.00%). Realized P&L: $0.00; unrealized P&L: $0.00. "
             "No realized or open-position contributors are recorded in this snapshot."
@@ -848,3 +855,112 @@ def test_chat_endpoint_omits_bar_without_provider():
     )
 
     assert response.json()["answer"] == _SAFE_READ_ONLY_LIMITATION
+
+
+def test_chat_pnl_explanation_returns_structured_sections():
+    class FakeLLM:
+        def complete(self, prompt):
+            return '{"topics": ["pnl_explanation"]}'
+
+    state = SharedState()
+    state.pnl_attribution = {
+        "daily_pnl": -1_050.0,
+        "daily_pnl_pct": -1.05,
+        "realized_pnl": -400.0,
+        "unrealized_pnl": -600.0,
+        "reconciliation_pnl": -50.0,
+        "open_positions": [
+            {
+                "ticker": "AAPL",
+                "qty": 3,
+                "avg_entry_price": 190.0,
+                "current_price": 185.0,
+                "unrealized_pnl": -15.0,
+                "unrealized_pnl_pct": -2.6315789,
+                "day_open": 187.5,
+                "day_close": 185.0,
+                "day_change": -2.5,
+                "day_change_pct": -1.3333333,
+            },
+        ],
+        "realized_trades": [
+            {
+                "ticker": "TSLA",
+                "qty": 2,
+                "entry_price": 250.0,
+                "exit_price": 248.0,
+                "realized_pnl": -400.0,
+                "exit_reason": "manual close",
+                "closed_at": "2026-08-31T14:30:00+00:00",
+            }
+        ],
+    }
+
+    response = TestClient(create_app(state, llm=FakeLLM())).post(
+        "/api/chat", json={"question": "What drove today's P&L?"}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["headline"]
+    assert isinstance(body["key_points"], list) and body["key_points"]
+    assert isinstance(body["details"], list) and body["details"]
+    assert body["headline"] in body["answer"]
+    assert body["disclaimer"] == _INFORMATIONAL_DISCLAIMER
+
+
+def test_structured_pnl_explanation_never_returns_raw_news():
+    class FakeLLM:
+        def complete(self, prompt):
+            return '{"topics": ["pnl_explanation"]}'
+
+    state = SharedState()
+    state.pnl_attribution = {
+        "daily_pnl": -100.0,
+        "daily_pnl_pct": -0.1,
+        "realized_pnl": -100.0,
+        "unrealized_pnl": 0.0,
+        "reconciliation_pnl": 0.0,
+        "open_positions": [
+            {
+                "ticker": "AAPL",
+                "qty": 1,
+                "avg_entry_price": 190.0,
+                "current_price": 185.0,
+                "unrealized_pnl": -5.0,
+                "unrealized_pnl_pct": -2.6315789,
+            }
+        ],
+        "realized_trades": [],
+        "news_by_ticker": {
+            "AAPL": [
+                {
+                    "headline": "Apple shares decline",
+                    "summary": "Apple shares decline after product update",
+                    "created_at": "2026-08-31T13:00:00+00:00",
+                    "source": "Associated Press",
+                }
+            ]
+        },
+    }
+
+    response = TestClient(create_app(state, llm=FakeLLM())).post(
+        "/api/chat", json={"question": "Explain today's P&L."}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    for field in ("headline", "answer"):
+        assert "Apple shares decline" not in body[field]
+        assert "news" not in body[field].lower()
+    for key_point in body["key_points"]:
+        assert "Apple shares decline" not in key_point
+        assert "news" not in key_point.lower()
+    for detail in body["details"]:
+        assert "Apple shares decline" not in detail
+        assert "news" not in detail.lower()
+
+
+def test_render_pnl_explanation_structured_returns_none_without_pnl():
+    assert render_pnl_explanation_structured({"daily_pnl": None, "realized_pnl": None, "unrealized_pnl": None}) is None
+    assert render_pnl_explanation_structured({}) is None

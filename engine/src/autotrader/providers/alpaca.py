@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from math import isfinite
 
 from alpaca.data import (
     DataFeed,
@@ -18,6 +19,7 @@ from alpaca.data.timeframe import TimeFrame
 
 from autotrader.config import Config
 from autotrader.history import HistoryRange, HistoryRequest, thin_bars
+from autotrader.models import Quote
 
 
 class AlpacaProvider:
@@ -28,10 +30,36 @@ class AlpacaProvider:
         self._trading = TradingClient(cfg.alpaca_api_key, cfg.alpaca_secret_key, paper=cfg.alpaca_paper)
         self._asset_search_cache: list[dict[str, str]] | None = None
 
-    def latest_price(self, ticker: str) -> float:
+    def latest_quote(self, ticker: str, *, now: datetime | None = None) -> Quote:
         req = StockLatestTradeRequest(symbol_or_symbols=[ticker], feed=DataFeed.IEX)
         trade = self._data.get_stock_latest_trade(req)[ticker]
-        return float(trade.price)
+        try:
+            price = float(trade.price)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid quote price") from exc
+        source_timestamp = getattr(trade, "timestamp", None)
+        observed_at = now or datetime.now(timezone.utc)
+        if not isfinite(price) or price <= 0:
+            raise ValueError("invalid quote price")
+        if not self._is_aware_datetime(source_timestamp) or not self._is_aware_datetime(observed_at):
+            raise ValueError("invalid quote timestamp")
+        return Quote(
+            ticker=ticker,
+            price=price,
+            source_timestamp=source_timestamp,
+            observed_at=observed_at,
+        )
+
+    @staticmethod
+    def _is_aware_datetime(value) -> bool:
+        return (
+            isinstance(value, datetime)
+            and value.tzinfo is not None
+            and value.utcoffset() is not None
+        )
+
+    def latest_price(self, ticker: str) -> float:
+        return self.latest_quote(ticker).price
 
     def latest_prices(self, tickers: list[str]) -> dict[str, float]:
         if not tickers:
