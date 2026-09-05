@@ -1,4 +1,5 @@
 import argparse
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -127,9 +128,9 @@ def main() -> None:
     if args.rearm:
         if lifecycle.request_rearm(startup_day):
             print("[safety] paper engine re-armed after clean local reconciliation")
-        else:
-            print("[safety] paper engine was not re-armed; it requires a new session and clean broker reconciliation")
-        return
+            sys.exit(0)
+        print("[safety] paper engine was not re-armed; it requires a new session and clean broker reconciliation")
+        sys.exit(1)
 
     # Publish initial state so the UI shows account data immediately, even outside market hours.
     initial_equity = runner.equity.equity if runner.equity is not None else cfg.paper_capital
