@@ -2,7 +2,7 @@ import inspect
 import math
 from datetime import datetime, timezone
 
-from autotrader.exits import ExitManager
+from autotrader.exits import DynamicExitEvaluator, ExitManager
 from autotrader.market import EASTERN
 from autotrader.models import ClosedTrade, Decision, Equity, Order, Side, SignalSet
 from autotrader.scoring import composite_score
@@ -35,6 +35,14 @@ class Runner:
         self.equity: Equity | None = None
         self.decisions: list = []
         self.exit_manager = ExitManager(cfg.stop_loss_pct, cfg.take_profit_pct) if cfg else None
+        self.dynamic_exit = None
+        if cfg is not None and getattr(cfg, "risk_profile", "initial") == "multi-entry":
+            self.dynamic_exit = DynamicExitEvaluator(
+                take_profit_pct=cfg.take_profit_pct,
+                provider=provider,
+                momentum=self.momentum,
+                sentiment=self.sentiment,
+            )
         self.closed_trades: list = []
         self.pending_orders: list[Order] = []
         self.flattened = False
@@ -243,6 +251,11 @@ class Runner:
             self.risk.positions = [item for item in self.risk.positions if item is not position]
         else:
             position.qty = remaining
+        realized_pnl = (exit_price - position.avg_entry_price) * qty
+        if realized_pnl < 0:
+            record = getattr(self.risk, "record_realized_loss", None)
+            if callable(record):
+                record(-realized_pnl)
         return True
 
     def reconcile(self) -> None:
@@ -265,9 +278,18 @@ class Runner:
                 price = self._exit_decision_price(pos.ticker)
                 if price is None:
                     return
-                reason = self.exit_manager.evaluate(pos, price)
-                if reason:
-                    self._close(pos, price, reason)
+                if self.dynamic_exit is not None:
+                    stop_reason = self.exit_manager.hard_stop(pos, price)
+                    if stop_reason:
+                        self._close(pos, price, stop_reason)
+                    else:
+                        dynamic_reason = self.dynamic_exit.decide(pos, price)
+                        if dynamic_reason:
+                            self._close(pos, price, dynamic_reason)
+                else:
+                    reason = self.exit_manager.evaluate(pos, price)
+                    if reason:
+                        self._close(pos, price, reason)
         except Exception as error:
             print(f"[error] manage_exits: {error}")
             self._fail_closed("exit_exception")
@@ -337,6 +359,7 @@ class Runner:
             session_id=self.risk.session_id,
             session_entry_count=self.risk.session_entry_count,
             cutoff_latched=self.risk.cutoff_latched,
+            daily_realized_loss_pct=self.risk.daily_realized_loss_pct,
             reservations=list(self.risk.reservations.values()),
             pending_orders=list(self.pending_orders),
         )

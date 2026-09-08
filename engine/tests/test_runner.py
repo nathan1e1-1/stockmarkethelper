@@ -1,3 +1,6 @@
+import sys
+
+from autotrader.exits import DynamicExitEvaluator
 from autotrader.runner import Runner
 from copy import deepcopy
 from dataclasses import dataclass
@@ -13,6 +16,22 @@ import pytest
 class BuyAgent:
     def decide(self, ss):
         return AgentDecision(ticker=ss.ticker, decision=Decision.BUY, rationale="t", confidence=0.7, signals=ss)
+
+
+class FakeMomentum:
+    def __init__(self, detail):
+        self.detail = detail
+
+    def compute(self, ticker, bars):
+        return Signal(name="momentum", value=0.5, detail=self.detail)
+
+
+class FakeSentiment:
+    def __init__(self, value):
+        self.value = value
+
+    def compute(self, ticker, news):
+        return Signal(name="sentiment", value=self.value, detail={})
 
 
 class FakeExec:
@@ -644,3 +663,107 @@ def test_immediately_filled_sell_acknowledgement_persists_and_reconciles(tmp_pat
     assert runner.reconcile_orders() is True
     assert [(trade.qty, trade.exit_price) for trade in runner.closed_trades] == [(10, 101)]
     assert risk.positions == []
+
+
+@dataclass
+class MultiCfg(PaperCfg):
+    max_position_pct: float = 0.05
+    max_gross_exposure_pct: float = 0.05
+    max_positions: int = 5
+    max_entries_per_session: int = sys.maxsize
+    kill_switch_pct: float = 0.25
+    risk_per_position_pct: float | None = 0.01
+    max_daily_risk_pct: float | None = 0.05
+    stop_loss_pct: float = 0.05
+    take_profit_pct: float = 0.05
+    risk_profile: str = "multi-entry"
+
+
+def make_multi_runner():
+    cfg = MultiCfg()
+    risk = RiskManager(cfg, clock=lambda: NOW, session_id="2026-09-01")
+    store = RecordingStore()
+    executor = FillExec()
+    runner = Runner(
+        provider=FreshProvider(), agent=BuyAgent(), executor=executor, risk=risk, cfg=cfg,
+        state_store=store, clock=lambda: NOW,
+    )
+    runner.equity = Equity(equity=100_000.0, day_start_equity=100_000.0, peak_equity=100_000.0, day="2026-09-01")
+    return runner, risk, executor, store
+
+
+def test_manage_exits_runs_hard_stop_first_and_skips_dynamic_for_stopped():
+    runner, risk, _, _ = make_multi_runner()
+    risk.positions = [Position(ticker="AAPL", qty=10.0, avg_entry_price=100.0, opened_at=NOW)]
+
+    calls = []
+    original = runner.provider.scan_bars
+    runner.provider.scan_bars = lambda ticker: calls.append(ticker) or original(ticker)
+
+    class StopProvider(FreshProvider):
+        def latest_quote(self, ticker, *, now=None):
+            from autotrader.models import Quote
+            return Quote(ticker=ticker, price=94.0, source_timestamp=now or NOW, observed_at=now or NOW)
+    runner.provider = StopProvider()
+    runner.dynamic_exit = DynamicExitEvaluator(take_profit_pct=0.05, provider=runner.provider)
+
+    runner.manage_exits()
+
+    assert runner.pending_orders[0].client_order_id.startswith("exit-2026-09-01-AAPL-stop_loss")
+    assert calls == []
+
+
+def test_manage_exits_hold_from_dynamic_leaves_position_open():
+    runner, risk, executor, _ = make_multi_runner()
+    risk.positions = [Position(ticker="AAPL", qty=10.0, avg_entry_price=100.0, opened_at=NOW)]
+
+    class DipProvider(FreshProvider):
+        def latest_quote(self, ticker, *, now=None):
+            from autotrader.models import Quote
+            return Quote(ticker=ticker, price=96.0, source_timestamp=now or NOW, observed_at=now or NOW)
+    runner.provider = DipProvider()
+    runner.dynamic_exit = DynamicExitEvaluator(
+        take_profit_pct=0.05, provider=runner.provider,
+        momentum=FakeMomentum({"sma_short": 102.0, "sma_long": 100.0}),
+    )
+
+    runner.manage_exits()
+
+    assert runner.pending_orders == []
+    assert executor.exit_requests == []
+
+
+def test_dynamic_early_exit_closes_position():
+    runner, risk, executor, _ = make_multi_runner()
+    risk.positions = [Position(ticker="AAPL", qty=10.0, avg_entry_price=100.0, opened_at=NOW)]
+
+    class EarlyProvider(FreshProvider):
+        def latest_quote(self, ticker, *, now=None):
+            from autotrader.models import Quote
+            return Quote(ticker=ticker, price=97.0, source_timestamp=now or NOW, observed_at=now or NOW)
+    runner.provider = EarlyProvider()
+    runner.dynamic_exit = DynamicExitEvaluator(
+        take_profit_pct=0.05, provider=runner.provider,
+        momentum=FakeMomentum({"sma_short": 98.0, "sma_long": 100.0}),
+        sentiment=FakeSentiment(-0.5),
+    )
+
+    runner.manage_exits()
+
+    assert runner.pending_orders[0].client_order_id.endswith("-exit_early")
+
+
+def test_stop_loss_fill_increments_daily_realized_loss():
+    runner, risk, executor, _ = make_multi_runner()
+    risk.positions = [Position(ticker="AAPL", qty=10.0, avg_entry_price=100.0, opened_at=NOW)]
+    runner._close(risk.positions[0], price=1.0, reason="stop_loss")
+    executor.orders["sell-1"] = Order(
+        id="sell-1", ticker="AAPL", side=Side.SELL, qty=10, status="filled",
+        client_order_id=runner.pending_orders[0].client_order_id,
+        filled_qty=10, filled_notional=940.0, filled_avg_price=94.0,
+        observed_at=NOW, timestamp=NOW,
+    )
+
+    runner.reconcile_orders()
+
+    assert risk.daily_realized_loss_pct == pytest.approx(60.0 / 100_000.0)  # (100-94)*10 / day_start
