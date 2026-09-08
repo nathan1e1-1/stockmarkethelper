@@ -1,4 +1,5 @@
 import argparse
+import socket
 import sys
 import threading
 import time
@@ -21,6 +22,18 @@ from autotrader.runner import Runner
 from autotrader.state import State, StateStore, same_day
 from autotrader.summary import daily_summary
 from autotrader.universe import build_universe
+
+
+def _port_busy(host: str, port: int) -> bool:
+    """Return True when another process is already bound to host:port."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind((host, port))
+        return False
+    except OSError:
+        return True
+    finally:
+        probe.close()
 
 
 def _pnl_tickers(snapshot: dict) -> list[str]:
@@ -110,7 +123,14 @@ def main() -> None:
     )
 
     app = create_app(shared, provider=provider, llm=agent)
-    if not args.once:
+    if not args.once and not args.rearm:
+        if _port_busy("127.0.0.1", 8001):
+            print(
+                "[safety] another engine instance is running (127.0.0.1:8001 is in use); "
+                "refusing to start a duplicate engine. Manage it via launchd / recover.sh.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         threading.Thread(
             target=uvicorn.run,
             kwargs={"app": app, "host": "127.0.0.1", "port": 8001, "log_level": "warning"},
