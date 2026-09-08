@@ -115,3 +115,13 @@ def test_dynamic_evaluator_failure_resolves_to_hold():
 def test_dynamic_evaluator_without_sentiment_treats_value_as_zero():
     de, _ = make_evaluator({"sma_short": 98.0, "sma_long": 100.0})
     assert de.decide(pos(100.0), 97.0) is None
+
+
+def test_dynamic_holds_when_trend_unknown():
+    de, _ = make_evaluator({"reason": "insufficient data"}, sentiment_value=-0.5)
+    assert de.decide(pos(100.0), 97.0) is None
+
+
+def test_dynamic_holds_at_target_when_uptrend_intact():
+    de, _ = make_evaluator({"sma_short": 102.0, "sma_long": 100.0}, sentiment_value=-0.5)
+    assert de.decide(pos(100.0), 105.5) is None
