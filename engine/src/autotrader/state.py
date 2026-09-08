@@ -63,6 +63,7 @@ class State:
     cutoff_latched: bool = False
     reservations: list[Reservation] = field(default_factory=list)
     pending_orders: list[Order] = field(default_factory=list)
+    daily_realized_loss_pct: float = 0.0
 
 
 def _decode_datetime(value, field_name: str) -> datetime:
@@ -245,6 +246,7 @@ def _halted_state(reason: str, *, base: State | None = None) -> State:
     state.cutoff_latched = False
     state.reservations = []
     state.pending_orders = []
+    state.daily_realized_loss_pct = 0.0
     return state
 
 
@@ -325,6 +327,10 @@ def _decode_safety_state(raw: dict, base: State, *, fail_closed: bool = True) ->
         base.cutoff_latched = cutoff_latched
         base.reservations = [_decode_reservation(item) for item in reservations]
         base.pending_orders = [_decode_order(item) for item in pending_orders]
+        daily_realized_loss = raw.get("daily_realized_loss_pct", 0.0)
+        if not _nonnegative_finite_number(daily_realized_loss):
+            raise ValueError("daily realized loss must be finite and nonnegative")
+        base.daily_realized_loss_pct = daily_realized_loss
         _validate_order_intent_coherence(base.reservations, base.pending_orders)
         return base
     except (KeyError, TypeError, ValueError):

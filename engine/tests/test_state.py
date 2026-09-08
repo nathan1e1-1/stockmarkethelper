@@ -580,3 +580,33 @@ def test_partial_fill_price_improvement_with_coherent_slices_remains_active(tmp_
     )))
 
     assert store.load().risk_state is RiskState.ACTIVE
+
+
+def test_state_roundtrips_daily_realized_loss(tmp_path):
+    store = StateStore(tmp_path)
+    store.save(State(daily_realized_loss_pct=0.03))
+    loaded = store.load()
+    assert loaded.daily_realized_loss_pct == 0.03
+
+
+def test_state_load_defaults_daily_realized_loss_to_zero(tmp_path):
+    store = StateStore(tmp_path)
+    store.path.write_text(json.dumps({
+        "risk_state": "active", "halt_reason": None,
+        "session_id": "2026-09-01", "session_entry_count": 0,
+        "cutoff_latched": False, "reservations": [], "pending_orders": [],
+    }))
+    loaded = store.load()
+    assert loaded.daily_realized_loss_pct == 0.0
+
+
+def test_state_rejects_negative_daily_realized_loss(tmp_path):
+    store = StateStore(tmp_path)
+    store.path.write_text(json.dumps({
+        "risk_state": "active", "halt_reason": None,
+        "session_id": "2026-09-01", "session_entry_count": 0,
+        "cutoff_latched": False, "reservations": [], "pending_orders": [],
+        "daily_realized_loss_pct": -0.01,
+    }))
+    loaded = store.load()
+    assert loaded.risk_state is RiskState.HALTED
