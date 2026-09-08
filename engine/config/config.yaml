@@ -4,14 +4,16 @@ ollama:
   base_url: "http://localhost:11434"
   model: "llama3.2"
 risk:
-  profile: initial
+  profile: multi-entry
   paper_capital: 100000.0
-  max_position_pct: 0.0025
-  max_gross_exposure_pct: 0.0025
-  max_positions: 1
-  max_entries_per_session: 1
+  max_position_pct: 0.05
+  max_gross_exposure_pct: 0.05
+  max_positions: 5
+  max_entries_per_session: 9223372036854775807
   max_snapshot_age_seconds: 120
-  kill_switch_pct: 0.10
+  risk_per_position_pct: 0.01
+  max_daily_risk_pct: 0.05
+  kill_switch_pct: 0.25
   daily_loss_pct: 0.05
 universe:
   size: 20
@@ -25,7 +27,7 @@ scoring:
     momentum: 0.6
     sentiment: 0.4
 exits:
-  stop_loss_pct: 0.02
-  take_profit_pct: 0.03
+  stop_loss_pct: 0.05
+  take_profit_pct: 0.05
   flatten_at_close: true
   flatten_time: "15:55"
