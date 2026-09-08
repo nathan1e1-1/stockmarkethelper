@@ -64,7 +64,13 @@ class Runner:
                 peak_equity=self.cfg.paper_capital,
                 day="",
             )
-        if self.risk and (self.risk.hard_stop_triggered(self.equity.equity) or self.risk.daily_stop_triggered(self.equity.equity)):
+        if self.risk and self.risk.hard_stop_triggered(self.equity.equity):
+            return
+        if (
+            self.risk
+            and getattr(self.cfg, "risk_profile", "initial") != "multi-entry"
+            and self.risk.daily_stop_triggered(self.equity.equity)
+        ):
             return
         threshold = self.cfg.entry_threshold if self.cfg else 0.5
         for ticker in universe:

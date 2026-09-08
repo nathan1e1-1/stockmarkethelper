@@ -307,8 +307,7 @@ def test_multi_entry_tick_keeps_trading_when_equity_above_daily_stop():
     assert engine.startup_reconcile() is True
     # 94k < day_start*(1-0.05)=95k: inside the daily-stop band; multi-entry must NOT halt.
     executor.equity = 94_000.0
-    runner.run_once = lambda universe: None
-    assert engine.tick(NOW, ["AAPL"]) is True
+    assert engine.tick(NOW, []) is True
     assert risk.state is RiskState.ACTIVE
 
 

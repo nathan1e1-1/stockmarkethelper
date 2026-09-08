@@ -769,3 +769,19 @@ def test_stop_loss_fill_increments_daily_realized_loss():
     runner.reconcile_orders()
 
     assert risk.daily_realized_loss_pct == pytest.approx(60.0 / 100_000.0)  # (100-94)*10 / day_start
+
+
+def test_multi_entry_run_once_ignores_daily_stop_band():
+    runner, risk, executor, _ = make_multi_runner()
+    runner.equity = Equity(equity=94_000.0, day_start_equity=100_000.0, peak_equity=100_000.0, day="2026-09-01")
+    runner.run_once([])
+    assert risk.state is RiskState.ACTIVE
+    assert risk.halt_reason is None
+
+
+def test_initial_run_once_still_halts_in_daily_stop_band():
+    runner, risk, _, _ = paper_runner()
+    runner.equity = Equity(equity=94_000.0, day_start_equity=100_000.0, peak_equity=100_000.0, day="2026-09-01")
+    runner.run_once([])
+    assert risk.state is not RiskState.ACTIVE
+    assert risk.halt_reason == "daily_stop"
