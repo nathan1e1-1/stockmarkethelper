@@ -1,4 +1,5 @@
 import os
+import sys
 
 import pytest
 import yaml
@@ -6,9 +7,9 @@ import yaml
 from autotrader.config import load_config
 
 
-def write_config(tmp_path, *, paper=True, risk_overrides=None):
+def write_config(tmp_path, *, paper=True, risk_overrides=None, exit_overrides=None, profile="initial"):
     risk = {
-        "profile": "initial",
+        "profile": profile,
         "paper_capital": 100000.0,
         "max_position_pct": 0.0025,
         "max_gross_exposure_pct": 0.0025,
@@ -18,7 +19,25 @@ def write_config(tmp_path, *, paper=True, risk_overrides=None):
         "kill_switch_pct": 0.10,
         "daily_loss_pct": 0.05,
     }
+    if profile == "multi-entry":
+        risk.update({
+            "max_position_pct": 0.05,
+            "max_gross_exposure_pct": 0.05,
+            "max_positions": 5,
+            "max_entries_per_session": sys.maxsize,
+            "max_snapshot_age_seconds": 120,
+            "risk_per_position_pct": 0.01,
+            "max_daily_risk_pct": 0.05,
+            "kill_switch_pct": 0.25,
+        })
     risk.update(risk_overrides or {})
+    exits = {
+        "stop_loss_pct": 0.02 if profile == "initial" else 0.05,
+        "take_profit_pct": 0.03 if profile == "initial" else 0.05,
+        "flatten_at_close": True,
+        "flatten_time": "15:55",
+    }
+    exits.update(exit_overrides or {})
     path = tmp_path / "config.yaml"
     path.write_text(
         yaml.safe_dump(
@@ -29,7 +48,7 @@ def write_config(tmp_path, *, paper=True, risk_overrides=None):
                 "universe": {"size": 20, "min_price": 5.0, "min_volume": 500000},
                 "loop": {"scan_interval_seconds": 60},
                 "scoring": {"entry_threshold": 0.5, "weights": {"momentum": 0.6, "sentiment": 0.4}},
-                "exits": {"stop_loss_pct": 0.02, "take_profit_pct": 0.03, "flatten_at_close": True, "flatten_time": "15:55"},
+                "exits": exits,
             }
         )
     )
@@ -129,4 +148,53 @@ def test_load_config_rejects_invalid_safety_caps(tmp_path, monkeypatch, risk_ove
     monkeypatch.setenv("ALPACA_SECRET_KEY", "sk_test")
 
     with pytest.raises(ValueError, match=field):
+        load_config(str(path))
+
+
+def test_load_config_accepts_multi_entry_profile(tmp_path, monkeypatch):
+    path = write_config(tmp_path, profile="multi-entry")
+    monkeypatch.setenv("ALPACA_API_KEY", "pk_test")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "sk_test")
+
+    cfg = load_config(str(path))
+
+    assert cfg.max_positions == 5
+    assert cfg.risk_per_position_pct == 0.01
+    assert cfg.max_daily_risk_pct == 0.05
+    assert cfg.max_entries_per_session == sys.maxsize
+    assert cfg.kill_switch_pct == 0.25
+    assert cfg.stop_loss_pct == 0.05
+    assert cfg.take_profit_pct == 0.05
+
+
+@pytest.mark.parametrize(
+    "risk_overrides",
+    [
+        {"max_positions": 4},
+        {"max_entries_per_session": 10},
+        {"max_snapshot_age_seconds": 1000},
+        {"risk_per_position_pct": 0.02},
+        {"risk_per_position_pct": 0.01, "max_daily_risk_pct": 0.05, "max_positions": 4},
+        {"kill_switch_pct": 0.10},
+    ],
+)
+def test_load_config_rejects_invalid_multi_entry_profile(tmp_path, monkeypatch, risk_overrides):
+    path = write_config(tmp_path, profile="multi-entry", risk_overrides=risk_overrides)
+    monkeypatch.setenv("ALPACA_API_KEY", "pk_test")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "sk_test")
+
+    with pytest.raises(ValueError):
+        load_config(str(path))
+
+
+def test_load_config_multi_entry_requires_single_shared_stop_distance(tmp_path, monkeypatch):
+    path = write_config(
+        tmp_path,
+        profile="multi-entry",
+        exit_overrides={"stop_loss_pct": 0.06},
+    )
+    monkeypatch.setenv("ALPACA_API_KEY", "pk_test")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "sk_test")
+
+    with pytest.raises(ValueError):
         load_config(str(path))

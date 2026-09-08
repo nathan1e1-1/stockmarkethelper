@@ -1,9 +1,14 @@
+import math
 import os
+import sys
 from dataclasses import dataclass
 from math import isfinite
 
 import yaml
 from dotenv import load_dotenv
+
+
+UNLIMITED_ENTRIES = sys.maxsize
 
 
 @dataclass
@@ -32,6 +37,8 @@ class Config:
     take_profit_pct: float
     flatten_at_close: bool
     flatten_time: str
+    risk_per_position_pct: float | None = None
+    max_daily_risk_pct: float | None = None
 
 
 def _positive_number(value, name: str) -> float:
@@ -52,9 +59,17 @@ def _validate_paper_profile(raw: dict) -> None:
         raise ValueError("paper trading must be enabled; live trading is not supported")
 
     risk = raw.get("risk", {})
-    if risk.get("profile") != "initial":
-        raise ValueError("risk.profile must be the approved 'initial' paper profile")
+    profile = risk.get("profile")
+    if profile == "initial":
+        _validate_initial_profile(risk)
+        return
+    if profile == "multi-entry":
+        _validate_multi_entry_profile(risk, raw.get("exits", {}))
+        return
+    raise ValueError("risk.profile must be an approved paper profile (initial or multi-entry)")
 
+
+def _validate_initial_profile(risk: dict) -> None:
     position_cap = _positive_number(risk.get("max_position_pct"), "max_position_pct")
     gross_cap = _positive_number(risk.get("max_gross_exposure_pct"), "max_gross_exposure_pct")
     max_positions = _positive_integer(risk.get("max_positions"), "max_positions")
@@ -68,6 +83,29 @@ def _validate_paper_profile(raw: dict) -> None:
         )
     if gross_cap < position_cap:
         raise ValueError("max_gross_exposure_pct must be at least max_position_pct")
+
+
+def _validate_multi_entry_profile(risk: dict, exits: dict) -> None:
+    max_positions = _positive_integer(risk.get("max_positions"), "max_positions")
+    max_entries = _positive_integer(risk.get("max_entries_per_session"), "max_entries_per_session")
+    max_snapshot_age = _positive_integer(risk.get("max_snapshot_age_seconds"), "max_snapshot_age_seconds")
+    kill_switch = _positive_number(risk.get("kill_switch_pct"), "kill_switch_pct")
+    risk_per_position = _positive_number(risk.get("risk_per_position_pct"), "risk_per_position_pct")
+    max_daily_risk = _positive_number(risk.get("max_daily_risk_pct"), "max_daily_risk_pct")
+    stop_loss = _positive_number(exits.get("stop_loss_pct"), "stop_loss_pct")
+    take_profit = _positive_number(exits.get("take_profit_pct"), "take_profit_pct")
+
+    if (max_positions, max_entries, max_snapshot_age) != (5, UNLIMITED_ENTRIES, 120):
+        raise ValueError(
+            "the multi-entry paper profile requires max_positions=5, "
+            f"max_entries_per_session={UNLIMITED_ENTRIES}, and max_snapshot_age_seconds=120"
+        )
+    if not math.isclose(max_daily_risk, risk_per_position * max_positions, rel_tol=1e-9, abs_tol=1e-9):
+        raise ValueError("max_daily_risk_pct must equal risk_per_position_pct * max_positions")
+    if not math.isclose(kill_switch, 0.25, rel_tol=1e-9, abs_tol=1e-9):
+        raise ValueError("the multi-entry paper profile requires kill_switch_pct=0.25")
+    if not math.isclose(stop_loss, 0.05, rel_tol=1e-9, abs_tol=1e-9) or not math.isclose(take_profit, 0.05, rel_tol=1e-9, abs_tol=1e-9):
+        raise ValueError("the multi-entry paper profile requires stop_loss_pct=take_profit_pct=0.05 (single shared stop distance)")
 
 
 def load_config(path: str = "config/config.yaml") -> Config:
@@ -91,6 +129,8 @@ def load_config(path: str = "config/config.yaml") -> Config:
         max_gross_exposure_pct=raw["risk"]["max_gross_exposure_pct"],
         max_positions=raw["risk"]["max_positions"],
         max_entries_per_session=raw["risk"]["max_entries_per_session"],
+        risk_per_position_pct=raw["risk"].get("risk_per_position_pct"),
+        max_daily_risk_pct=raw["risk"].get("max_daily_risk_pct"),
         max_snapshot_age_seconds=raw["risk"]["max_snapshot_age_seconds"],
         kill_switch_pct=raw["risk"]["kill_switch_pct"],
         daily_loss_pct=raw["risk"]["daily_loss_pct"],
