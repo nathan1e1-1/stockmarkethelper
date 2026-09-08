@@ -697,10 +697,12 @@ def test_manage_exits_runs_hard_stop_first_and_skips_dynamic_for_stopped():
     risk.positions = [Position(ticker="AAPL", qty=10.0, avg_entry_price=100.0, opened_at=NOW)]
 
     calls = []
-    original = runner.provider.scan_bars
-    runner.provider.scan_bars = lambda ticker: calls.append(ticker) or original(ticker)
 
     class StopProvider(FreshProvider):
+        def scan_bars(self, ticker):
+            calls.append(ticker)
+            return super().scan_bars(ticker)
+
         def latest_quote(self, ticker, *, now=None):
             from autotrader.models import Quote
             return Quote(ticker=ticker, price=94.0, source_timestamp=now or NOW, observed_at=now or NOW)
