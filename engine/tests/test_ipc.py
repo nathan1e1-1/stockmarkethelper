@@ -12,7 +12,7 @@ from autotrader.ipc import (
     create_app,
     SharedState,
 )
-from autotrader.models import AgentDecision, ClosedTrade, Decision, Equity, Position
+from autotrader.models import AgentDecision, ClosedTrade, Decision, Equity, Position, Reservation
 from autotrader.pnl_explanation import render_pnl_explanation_structured
 from autotrader.risk import RiskManager
 
@@ -1024,7 +1024,7 @@ def test_status_exposes_daily_realized_loss_and_slots():
     assert body["open_slots"] == 5
 
 
-def test_status_daily_risk_gate_tripped_blocks_entries():
+def test_status_reports_daily_risk_gate_tripped():
     state = SharedState()
     state.equity = Equity(equity=100_000.0, day_start_equity=100_000.0, peak_equity=100_000.0, day="d")
     state.risk = _status_risk()
@@ -1033,6 +1033,18 @@ def test_status_daily_risk_gate_tripped_blocks_entries():
     body = client.get("/api/status").json()
     assert body["daily_risk_gate_tripped"] is True
     assert body["open_slots"] == 5
+
+
+def test_status_open_slots_accounts_for_reserved_slots():
+    state = SharedState()
+    state.equity = Equity(equity=100_000.0, day_start_equity=100_000.0, peak_equity=100_000.0, day="d")
+    state.risk = _status_risk()
+    now_ts = datetime.now(timezone.utc)
+    reservation = Reservation("entry-c", "MSFT", 200.0, 100.0, now_ts)
+    state.risk.reservations[reservation.client_order_id] = reservation  # one slot taken
+    client = TestClient(create_app(state))
+    body = client.get("/api/status").json()
+    assert body["open_slots"] == 4
 
 
 def test_status_without_risk_reports_nulls():
