@@ -848,3 +848,52 @@ def test_rearm_clears_daily_realized_loss(now):
     assert rm.complete_halt(clean_reconciliation=True) is True
     assert rm.rearm("2026-09-02", clean_reconciliation=True) is True
     assert rm.daily_realized_loss_pct == 0.0
+
+
+def test_can_enter_honors_daily_risk_gate(multi_risk):
+    assert multi_risk.can_enter("AAPL") is True
+    multi_risk.record_realized_loss(5_000.0)  # 5% -> gate tripped
+    assert multi_risk.can_enter("AAPL") is False
+
+
+def test_restore_of_tripped_accumulator_blocks_new_entries(now):
+    restored = RiskManager(MultiEntryPaperCfg(), clock=lambda: now, session_id="2026-09-01")
+    assert restored.restore_persisted_safety_state(
+        positions=[], reservations=[], pending_orders=[], risk_state=RiskState.ACTIVE,
+        halt_reason=None, session_id="2026-09-01", session_entry_count=0,
+        cutoff_latched=False, daily_realized_loss_pct=0.05,
+    ) is True
+    assert restored.daily_realized_loss_pct == 0.05
+    blocked = restored.reserve_entry("AAPL", 20, 100.0, 100_000.0, now)
+    assert blocked.accepted is False
+    assert blocked.reason == "max_daily_risk_pct"
+
+
+@pytest.mark.parametrize("bad_loss", [float("nan"), float("inf"), True, -0.01])
+def test_restore_rejects_nonfinite_bool_or_negative_daily_realized_loss(now, bad_loss):
+    restored = RiskManager(MultiEntryPaperCfg(), clock=lambda: now, session_id="2026-09-01")
+    assert restored.restore_persisted_safety_state(
+        positions=[], reservations=[], pending_orders=[], risk_state=RiskState.ACTIVE,
+        halt_reason=None, session_id="2026-09-01", session_entry_count=0,
+        cutoff_latched=False, daily_realized_loss_pct=bad_loss,
+    ) is False
+
+
+@dataclass
+class ZeroStopMultiEntryCfg(MultiEntryPaperCfg):
+    stop_loss_pct: float = 0.0
+
+
+@pytest.fixture
+def zero_stop_multi_risk(now):
+    return RiskManager(ZeroStopMultiEntryCfg(), clock=lambda: now, session_id="2026-09-01")
+
+
+def test_nonpositive_stop_loss_pct_denies_position_size_without_throwing(zero_stop_multi_risk):
+    assert zero_stop_multi_risk.position_size("AAPL", price=100.0, equity=100_000.0) == 0
+
+
+def test_nonpositive_stop_loss_pct_denies_reserve_entry_without_throwing(zero_stop_multi_risk, now):
+    admission = zero_stop_multi_risk.reserve_entry("AAPL", 20, 100.0, 100_000.0, now)
+    assert admission.accepted is False
+    assert admission.reason == "invalid_input"

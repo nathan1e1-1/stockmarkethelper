@@ -96,7 +96,10 @@ class RiskManager:
             return 0
         rpp = getattr(self.cfg, "risk_per_position_pct", None)
         if rpp is not None:
-            budget = (equity * rpp) / getattr(self.cfg, "stop_loss_pct", 1.0)
+            stop = getattr(self.cfg, "stop_loss_pct", 1.0)
+            if not self._positive(stop):
+                return 0
+            budget = (equity * rpp) / stop
         else:
             budget = equity * getattr(self.cfg, "max_position_pct", 0.0)
         if not self._positive(budget):
@@ -255,7 +258,10 @@ class RiskManager:
             return Admission(reason="invalid_input")
         rpp = getattr(self.cfg, "risk_per_position_pct", None)
         if rpp is not None:
-            budget = (equity * rpp) / getattr(self.cfg, "stop_loss_pct", 1.0)
+            stop = getattr(self.cfg, "stop_loss_pct", 1.0)
+            if not self._positive(stop):
+                return Admission(reason="invalid_input")
+            budget = (equity * rpp) / stop
             if notional > budget:
                 return Admission(reason="max_position_exposure")
         else:
