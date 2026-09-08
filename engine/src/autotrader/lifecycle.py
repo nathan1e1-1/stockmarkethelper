@@ -81,7 +81,11 @@ class EngineLifecycle:
         equity = snapshot.equity
         self.risk.peak_equity = max(self.risk.peak_equity, equity)
         self.runner.equity = Equity(equity, self.risk.day_start_equity, self.risk.peak_equity, self._session_id(now))
-        if self.risk.hard_stop_triggered(equity) or self.risk.daily_stop_triggered(equity):
+        if self.risk.hard_stop_triggered(equity):
+            self._persist_or_halt("halt_persistence_failure")
+            self._reconcile_and_cleanup()
+            return False
+        if getattr(self.cfg, "risk_profile", "initial") != "multi-entry" and self.risk.daily_stop_triggered(equity):
             self._persist_or_halt("halt_persistence_failure")
             self._reconcile_and_cleanup()
             return False
@@ -127,6 +131,7 @@ class EngineLifecycle:
             session_id=loaded.session_id or self._session_id(self._now()),
             session_entry_count=loaded.session_entry_count,
             cutoff_latched=loaded.cutoff_latched,
+            daily_realized_loss_pct=loaded.daily_realized_loss_pct,
         ):
             self.risk.begin_halt("invalid_persisted_risk_state")
         snapshot = self._account_snapshot(self._now())

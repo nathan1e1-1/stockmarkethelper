@@ -1,3 +1,4 @@
+import sys
 from copy import deepcopy
 from datetime import datetime, time, timedelta, timezone
 
@@ -274,3 +275,61 @@ def test_restored_active_prior_session_requires_local_next_session_rearm():
     assert engine.can_scan is False
     assert engine.request_rearm("2026-09-02") is True
     assert risk.state is RiskState.ACTIVE
+
+
+class MultiEntryConfig(Config):
+    max_position_pct = 0.05
+    max_gross_exposure_pct = 0.05
+    max_positions = 5
+    max_entries_per_session = sys.maxsize
+    kill_switch_pct = 0.25
+    daily_loss_pct = 0.05
+    stop_loss_pct = 0.05
+    take_profit_pct = 0.05
+    risk_per_position_pct = 0.01
+    max_daily_risk_pct = 0.05
+    risk_profile = "multi-entry"
+
+
+def multi_lifecycle(*, store=None, executor=None):
+    cfg = MultiEntryConfig()
+    risk = RiskManager(cfg, clock=lambda: NOW, session_id="2026-09-02")
+    executor = executor or Executor()
+    store = store or Store()
+    runner = Runner(Provider(), None, executor, risk, cfg, state_store=store, clock=lambda: NOW)
+    runner.equity = Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02")
+    return EngineLifecycle(cfg, executor, risk, runner, store, clock=lambda: NOW), risk, runner, executor, store
+
+
+def test_multi_entry_tick_keeps_trading_when_equity_above_daily_stop():
+    engine, risk, runner, executor, _ = multi_lifecycle()
+
+    assert engine.startup_reconcile() is True
+    # 94k < day_start*(1-0.05)=95k: inside the daily-stop band; multi-entry must NOT halt.
+    executor.equity = 94_000.0
+    runner.run_once = lambda universe: None
+    assert engine.tick(NOW, ["AAPL"]) is True
+    assert risk.state is RiskState.ACTIVE
+
+
+def test_multi_entry_tick_hard_stop_floor_still_halts():
+    engine, risk, runner, executor, _ = multi_lifecycle()
+
+    assert engine.startup_reconcile() is True
+    executor.equity = 74_000.0  # <= 100k*(1-0.25): hard stop floor still halts
+    runner.run_once = lambda universe: None
+    engine.tick(NOW, ["AAPL"])
+    assert risk.state is not RiskState.ACTIVE
+
+
+def test_multi_entry_restore_keeps_daily_realized_loss_across_restart():
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        risk_state=RiskState.ACTIVE,
+        session_id="2026-09-02",
+        daily_realized_loss_pct=0.04,
+    )
+    engine, risk, runner, executor, _ = multi_lifecycle(store=Store(loaded))
+
+    assert engine.startup_reconcile() is True
+    assert risk.daily_realized_loss_pct == 0.04
