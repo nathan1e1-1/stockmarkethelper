@@ -65,6 +65,7 @@ class RiskManager:
         self.state = RiskState.ACTIVE
         self.halt_reason: str | None = None
         self.cutoff_latched = False
+        self.daily_realized_loss_pct = 0.0
         self.session_entry_count = 0
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         session_candidate = session_id
@@ -93,7 +94,11 @@ class RiskManager:
     def position_size(self, ticker: str, price: float, equity: float) -> int:
         if not self._positive(price) or not self._positive(equity):
             return 0
-        budget = equity * self.cfg.max_position_pct
+        rpp = getattr(self.cfg, "risk_per_position_pct", None)
+        if rpp is not None:
+            budget = (equity * rpp) / getattr(self.cfg, "stop_loss_pct", 1.0)
+        else:
+            budget = equity * getattr(self.cfg, "max_position_pct", 0.0)
         if not self._positive(budget):
             return 0
         return max(0, math.floor(budget / price))
@@ -106,6 +111,7 @@ class RiskManager:
                 and not self.cutoff_latched
                 and self.session_entry_count < self.cfg.max_entries_per_session
                 and not self._has_ticker(ticker)
+                and not self._daily_risk_gate_tripped()
                 and self._position_count() < self.cfg.max_positions
             )
 
@@ -121,6 +127,7 @@ class RiskManager:
         session_id,
         session_entry_count,
         cutoff_latched,
+        daily_realized_loss_pct: float = 0.0,
     ) -> bool:
         """Atomically hydrate validated risk bookkeeping from durable state."""
         if (
@@ -130,6 +137,10 @@ class RiskManager:
             or isinstance(session_entry_count, bool)
             or session_entry_count < 0
             or not isinstance(cutoff_latched, bool)
+            or isinstance(daily_realized_loss_pct, bool)
+            or not isinstance(daily_realized_loss_pct, (int, float))
+            or not math.isfinite(daily_realized_loss_pct)
+            or daily_realized_loss_pct < 0
             or (halt_reason is not None and type(halt_reason) is not str)
             or not isinstance(positions, list)
             or not isinstance(reservations, list)
@@ -200,6 +211,7 @@ class RiskManager:
         self.session_id = session_id
         self.session_entry_count = session_entry_count
         self.cutoff_latched = cutoff_latched
+        self.daily_realized_loss_pct = daily_realized_loss_pct
         return True
 
     def reserve_entry(
@@ -236,13 +248,21 @@ class RiskManager:
             return Admission(reason="duplicate_ticker")
         if self._position_count() >= self.cfg.max_positions:
             return Admission(reason="max_positions")
+        if self._daily_risk_gate_tripped():
+            return Admission(reason="max_daily_risk_pct")
         notional = qty * limit_price
         if not self._positive(notional):
             return Admission(reason="invalid_input")
-        if notional > equity * self.cfg.max_position_pct:
-            return Admission(reason="max_position_exposure")
-        if self.gross_exposure_notional + notional > equity * self.cfg.max_gross_exposure_pct:
-            return Admission(reason="max_gross_exposure")
+        rpp = getattr(self.cfg, "risk_per_position_pct", None)
+        if rpp is not None:
+            budget = (equity * rpp) / getattr(self.cfg, "stop_loss_pct", 1.0)
+            if notional > budget:
+                return Admission(reason="max_position_exposure")
+        else:
+            if notional > equity * self.cfg.max_position_pct:
+                return Admission(reason="max_position_exposure")
+            if self.gross_exposure_notional + notional > equity * self.cfg.max_gross_exposure_pct:
+                return Admission(reason="max_gross_exposure")
         if self.session_entry_count >= self.cfg.max_entries_per_session:
             return Admission(reason="max_entries_per_session")
 
@@ -470,6 +490,7 @@ class RiskManager:
         self.session_id = date.fromisoformat(session_id).isoformat()
         self.session_entry_count = 0
         self.cutoff_latched = False
+        self.daily_realized_loss_pct = 0.0
         self.halt_reason = None
         self.state = RiskState.ACTIVE
         return True
@@ -494,6 +515,17 @@ class RiskManager:
             self.begin_halt("daily_stop")
         return triggered
 
+    @_synchronized
+    def record_realized_loss(self, loss: float) -> bool:
+        if isinstance(loss, bool) or not isinstance(loss, (int, float)) or not math.isfinite(loss) or loss < 0:
+            self.begin_halt("invalid_realized_loss")
+            return False
+        if not self._positive(self.day_start_equity):
+            self.begin_halt("invalid_equity")
+            return False
+        self.daily_realized_loss_pct += loss / self.day_start_equity
+        return True
+
     def _has_ticker(self, ticker: str) -> bool:
         return any(position.ticker == ticker for position in self.positions) or any(
             reservation.ticker == ticker for reservation in self.reservations.values()
@@ -501,6 +533,13 @@ class RiskManager:
 
     def _tracking_is_empty(self) -> bool:
         return not self.reservations and not self._pending_entries and not self.positions
+
+    def _daily_risk_gate_tripped(self) -> bool:
+        rpp = getattr(self.cfg, "risk_per_position_pct", None)
+        maximum = getattr(self.cfg, "max_daily_risk_pct", None)
+        if rpp is None or maximum is None:
+            return False
+        return self.daily_realized_loss_pct >= maximum
 
     def _position_count(self) -> int:
         return len({position.ticker for position in self.positions} | {reservation.ticker for reservation in self.reservations.values()})
