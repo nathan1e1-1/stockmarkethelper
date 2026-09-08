@@ -203,8 +203,12 @@ def test_load_config_multi_entry_requires_single_shared_stop_distance(tmp_path, 
 def test_live_config_yaml_uses_an_approved_profile():
     from pathlib import Path
 
+    import autotrader.config as config_module
+
     repo_config = Path(__file__).resolve().parents[1] / "config" / "config.yaml"
     assert repo_config.exists(), "repo config.yaml must exist for the live engine"
     with open(repo_config) as fh:
         raw = yaml.safe_load(fh)
     assert raw["risk"]["profile"] in {"initial", "multi-entry"}
+    # A drift in the approved exact-values would fail at launch; catch it in CI.
+    config_module._validate_paper_profile(raw)
