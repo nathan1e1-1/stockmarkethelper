@@ -12,7 +12,7 @@ from autotrader.ipc import (
     create_app,
     SharedState,
 )
-from autotrader.models import AgentDecision, Decision, Equity, Position
+from autotrader.models import AgentDecision, ClosedTrade, Decision, Equity, Position
 from autotrader.pnl_explanation import render_pnl_explanation_structured
 
 
@@ -40,6 +40,32 @@ def test_status_endpoint():
     body = r.json()
     assert body["equity"]["equity"] == 99000.0
     assert body["kill_switch"] is False
+
+
+def test_status_includes_closed_trades():
+    state = SharedState()
+    state.equity = Equity(equity=99000.0, day_start_equity=100000.0, peak_equity=100000.0, day="d")
+    state.closed_trades = [
+        ClosedTrade(
+            ticker="SPCX",
+            qty=2.0,
+            entry_price=145.67,
+            exit_price=146.04,
+            realized_pnl=0.74,
+            exit_reason="take_profit",
+        )
+    ]
+    client = TestClient(create_app(state))
+    r = client.get("/api/status")
+    assert r.status_code == 200
+    trades = r.json()["closed_trades"]
+    assert len(trades) == 1
+    assert trades[0]["ticker"] == "SPCX"
+    assert trades[0]["qty"] == 2.0
+    assert trades[0]["entry_price"] == 145.67
+    assert trades[0]["exit_price"] == 146.04
+    assert trades[0]["realized_pnl"] == 0.74
+    assert trades[0]["exit_reason"] == "take_profit"
 
 
 def test_status_includes_equity_history():

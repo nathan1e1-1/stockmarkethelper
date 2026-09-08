@@ -25,15 +25,30 @@ from autotrader.universe import build_universe
 
 
 def _port_busy(host: str, port: int) -> bool:
-    """Return True when another process is already bound to host:port."""
+    """Return True when another process is actively listening on host:port.
+
+    SO_REUSEADDR lets the probe bind past leftover TIME_WAIT sockets (a just-killed
+    engine can leave the port "stuck" for ~60s otherwise), while an active listener
+    still makes bind fail with EADDRINUSE.
+    """
     probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         probe.bind((host, port))
         return False
     except OSError:
         return True
     finally:
         probe.close()
+
+
+def _wait_port_free(host: str, port: int, attempts: int = 8, interval: float = 0.5) -> bool:
+    """Wait briefly for a dying instance to release host:port; return True when free."""
+    for _ in range(attempts):
+        if not _port_busy(host, port):
+            return True
+        time.sleep(interval)
+    return False
 
 
 def _pnl_tickers(snapshot: dict) -> list[str]:
@@ -124,7 +139,7 @@ def main() -> None:
 
     app = create_app(shared, provider=provider, llm=agent)
     if not args.once and not args.rearm:
-        if _port_busy("127.0.0.1", 8001):
+        if not _wait_port_free("127.0.0.1", 8001):
             print(
                 "[safety] another engine instance is running (127.0.0.1:8001 is in use); "
                 "refusing to start a duplicate engine. Manage it via launchd / recover.sh.",
@@ -163,6 +178,7 @@ def main() -> None:
     shared.equity = runner.equity
     shared.positions = list(risk.positions)
     shared.risk = risk
+    shared.closed_trades = list(runner.closed_trades)
     publish_pnl_attribution(shared, provider, runner.equity, shared.positions, runner.closed_trades)
 
     def sync_and_scan(day: str) -> None:
@@ -172,6 +188,7 @@ def main() -> None:
         shared.positions = list(risk.positions)
         publish_pnl_attribution(shared, provider, runner.equity, shared.positions, runner.closed_trades)
         shared.decisions = runner.decisions
+        shared.closed_trades = list(runner.closed_trades)
         shared.risk = risk
         shared.equity_history.append({"t": time.time(), "equity": equity})
 

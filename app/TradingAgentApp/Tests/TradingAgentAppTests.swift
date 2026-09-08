@@ -78,6 +78,36 @@ final class TradingAgentAppTests: XCTestCase {
         XCTAssertEqual(nearestEquityPoint(to: Date(timeIntervalSince1970: 1_250), in: [first, second])?.id, second.id)
     }
 
+    func testClosedTradeDecodesFields() throws {
+        let data = #"{"ticker":"SPCX","qty":2.0,"entry_price":145.67,"exit_price":146.04,"realized_pnl":0.74,"exit_reason":"take_profit","closed_at":"2026-09-08T13:44:33Z"}"#.data(using: .utf8)!
+
+        let trade = try JSONDecoder().decode(ClosedTrade.self, from: data)
+
+        XCTAssertEqual(trade.ticker, "SPCX")
+        XCTAssertEqual(trade.qty, 2.0)
+        XCTAssertEqual(trade.entry_price, 145.67)
+        XCTAssertEqual(trade.exit_price, 146.04)
+        XCTAssertEqual(trade.realized_pnl, 0.74)
+        XCTAssertEqual(trade.exit_reason, "take_profit")
+    }
+
+    func testEngineStatusDecodesClosedTrades() throws {
+        let data = #"{"closed_trades":[{"ticker":"SPCX","qty":2.0,"entry_price":145.67,"exit_price":146.04,"realized_pnl":0.74,"exit_reason":"take_profit","closed_at":"2026-09-08T13:44:33Z"}]}"#.data(using: .utf8)!
+
+        let status = try JSONDecoder().decode(EngineStatus.self, from: data)
+
+        XCTAssertEqual(status.closed_trades.count, 1)
+        XCTAssertEqual(status.closed_trades.first?.realized_pnl, 0.74)
+    }
+
+    func testEngineStatusClosedTradesDefaultsToEmptyWhenAbsent() throws {
+        let data = #"{}"#.data(using: .utf8)!
+
+        let status = try JSONDecoder().decode(EngineStatus.self, from: data)
+
+        XCTAssertEqual(status.closed_trades, [])
+    }
+
     func testSummaryParserRecognizesLabelledSections() {
         let raw = """
         Day P&L:

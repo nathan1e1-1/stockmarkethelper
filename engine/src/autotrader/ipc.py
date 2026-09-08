@@ -29,6 +29,7 @@ class SharedState:
         self.equity: Equity | None = None
         self.positions: list = []
         self.decisions: list = []
+        self.closed_trades: list = []
         self.summary: str = ""
         self.risk = None
         self.equity_history: list = []
@@ -203,6 +204,7 @@ def create_app(state: SharedState, provider=None, llm=None) -> FastAPI:
             "equity": asdict(eq) if eq else None,
             "positions": [asdict(p) for p in state.positions],
             "decisions": [asdict(d) for d in state.decisions],
+            "closed_trades": [asdict(t) for t in state.closed_trades],
             "equity_history": state.equity_history,
             "kill_switch": state.risk.hard_stop_triggered(eq.equity) if (state.risk and eq) else False,
             "daily_stop": state.risk.daily_stop_triggered(eq.equity) if (state.risk and eq) else False,
