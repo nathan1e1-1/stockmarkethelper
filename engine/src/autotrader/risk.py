@@ -522,6 +522,15 @@ class RiskManager:
         return triggered
 
     @_synchronized
+    def daily_risk_gate_tripped(self) -> bool:
+        return self._daily_risk_gate_tripped()
+
+    @_synchronized
+    def open_position_slots(self) -> int:
+        slots = self.cfg.max_positions - self._position_count()
+        return max(0, slots)
+
+    @_synchronized
     def record_realized_loss(self, loss: float) -> bool:
         if isinstance(loss, bool) or not isinstance(loss, (int, float)) or not math.isfinite(loss) or loss < 0:
             self.begin_halt("invalid_realized_loss")

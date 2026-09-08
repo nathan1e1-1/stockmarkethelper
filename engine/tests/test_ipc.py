@@ -14,6 +14,7 @@ from autotrader.ipc import (
 )
 from autotrader.models import AgentDecision, ClosedTrade, Decision, Equity, Position
 from autotrader.pnl_explanation import render_pnl_explanation_structured
+from autotrader.risk import RiskManager
 
 
 @pytest.fixture
@@ -990,3 +991,55 @@ def test_structured_pnl_explanation_never_returns_raw_news():
 def test_render_pnl_explanation_structured_returns_none_without_pnl():
     assert render_pnl_explanation_structured({"daily_pnl": None, "realized_pnl": None, "unrealized_pnl": None}) is None
     assert render_pnl_explanation_structured({}) is None
+
+
+class StatusRiskCfg:
+    max_positions = 5
+    max_entries_per_session = 10**9
+    risk_per_position_pct = 0.01
+    max_daily_risk_pct = 0.05
+    stop_loss_pct = 0.05
+    take_profit_pct = 0.05
+    kill_switch_pct = 0.25
+    daily_loss_pct = 0.05
+    paper_capital = 100_000.0
+    max_position_pct = 0.05
+    max_gross_exposure_pct = 0.05
+    max_snapshot_age_seconds = 120
+
+
+def _status_risk():
+    return RiskManager(StatusRiskCfg(), clock=lambda: datetime.now(timezone.utc), session_id="2026-09-02")
+
+
+def test_status_exposes_daily_realized_loss_and_slots():
+    state = SharedState()
+    state.equity = Equity(equity=100_000.0, day_start_equity=100_000.0, peak_equity=100_000.0, day="d")
+    state.risk = _status_risk()
+    state.risk.record_realized_loss(2_000.0)
+    client = TestClient(create_app(state))
+    body = client.get("/api/status").json()
+    assert body["daily_realized_loss_pct"] == pytest.approx(0.02)
+    assert body["daily_risk_gate_tripped"] is False
+    assert body["open_slots"] == 5
+
+
+def test_status_daily_risk_gate_tripped_blocks_entries():
+    state = SharedState()
+    state.equity = Equity(equity=100_000.0, day_start_equity=100_000.0, peak_equity=100_000.0, day="d")
+    state.risk = _status_risk()
+    state.risk.record_realized_loss(5_000.0)
+    client = TestClient(create_app(state))
+    body = client.get("/api/status").json()
+    assert body["daily_risk_gate_tripped"] is True
+    assert body["open_slots"] == 5
+
+
+def test_status_without_risk_reports_nulls():
+    state = SharedState()
+    state.equity = Equity(equity=100_000.0, day_start_equity=100_000.0, peak_equity=100_000.0, day="d")
+    client = TestClient(create_app(state))
+    body = client.get("/api/status").json()
+    assert body["daily_realized_loss_pct"] is None
+    assert body["daily_risk_gate_tripped"] is None
+    assert body["open_slots"] is None

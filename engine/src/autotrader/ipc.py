@@ -208,6 +208,9 @@ def create_app(state: SharedState, provider=None, llm=None) -> FastAPI:
             "equity_history": state.equity_history,
             "kill_switch": state.risk.hard_stop_triggered(eq.equity) if (state.risk and eq) else False,
             "daily_stop": state.risk.daily_stop_triggered(eq.equity) if (state.risk and eq) else False,
+            "daily_realized_loss_pct": state.risk.daily_realized_loss_pct if state.risk else None,
+            "daily_risk_gate_tripped": state.risk.daily_risk_gate_tripped() if state.risk else None,
+            "open_slots": state.risk.open_position_slots() if state.risk else None,
         }
         return body
 
