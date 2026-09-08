@@ -31,7 +31,7 @@ existing `initial` profile, which remains byte-for-byte intact.
 
 - Add approved profile `multi-entry` to `_validate_paper_profile` with exact values:
   - `max_positions: 5`
-  - `max_entries_per_session: unlimited` (no cap; session gating is via the realized-loss gate instead) — represented explicitly as a sentinel (e.g. a large `int` const or `None`), since `Config` types the field as `int`.
+  - `max_entries_per_session: unlimited` (no cap; session gating is via the realized-loss gate instead). **Decision: sentinel `sys.maxsize`** via a named constant (e.g. `UNLIMITED_ENTRIES = sys.maxsize`). The field stays `int`, and the only two consumers (`risk.py:107` and `risk.py:246`) are strict comparisons — neither does arithmetic on the value — so no call site changes and no `None`-handling spread. A `None`/`Optional[int]` representation was rejected: it would force every future consumer to handle `None` explicitly.
   - `risk_per_position_pct: 0.01` (1%)
   - `max_daily_risk_pct: 0.05` (5%)
   - `stop_loss_pct: 0.05` (5%, shared stop distance)
@@ -70,7 +70,9 @@ Per tick, per open position, in this exact order:
 
 ### R5 — Session-level drawdown limits
 
-- **Realized-loss entry gate (`max_daily_risk_pct`).** New `daily_realized_loss_pct` metric in `RiskManager`: incremented by the realized loss each time a *losing exit* closes a position — a `stop_loss` exit or a dynamic `exit_early` whose fill is below entry. Realized gains do not offset it (cumulative realized *damage*). Keyed on cumulative loss normalized to equity, not consecutive-stop count — 3 small stops and 1 big stop are treated the same if the realized damage equals.
+- **Realized-loss entry gate (`max_daily_risk_pct`).** New `daily_realized_loss_pct` metric in `RiskManager`: incremented by the realized loss each time a *losing exit* closes a position — a `stop_loss` exit **or** a dynamic `exit_early` whose fill is below entry. Realized gains do not offset it (cumulative realized *damage*). Keyed on cumulative loss normalized to equity, not consecutive-stop count — 3 small stops and 1 big stop are treated the same if the realized damage equals.
+
+  **Note (scope addition vs. earlier discussion):** the earlier gate description only counted `stop_loss` exits. This spec deliberately counts dynamic `exit_early` losses too, because a position exited early on a trend break before reaching the full 5% stop is still realized damage — excluding it would understate `daily_realized_loss_pct` relative to what it measures. Intentional, not an oversight.
   - When `daily_realized_loss_pct ≥ max_daily_risk_pct` (5%), no new entries for the rest of the session. Freed slots are not refilled.
   - Existing open positions continue their normal exit logic (hard stop, dynamic hold/exit). The gate only stops refilling, not exiting.
   - Persisted in `_state()` / `restore_persisted_safety_state` so a mid-session restart doesn't reset the counter.
@@ -84,7 +86,7 @@ Per tick, per open position, in this exact order:
 
 ## Implementation surface
 
-- `engine/src/autotrader/config.py` — `multi-entry` validation branch; new fields (`risk_per_position_pct`, `daily_realized_loss tracking config`); `initial` untouched.
+- `engine/src/autotrader/config.py` — `multi-entry` validation branch; new fields (`risk_per_position_pct`, `max_daily_risk_pct`, `UNLIMITED_ENTRIES` sentinel); `initial` untouched.
 - `engine/config/config.yaml` — `multi-entry` profile block (or switch profile + stop to 0.05 + risk caps).
 - `engine/src/autotrader/risk.py` — risk-based `position_size`; `daily_realized_loss_pct` accumulator; entry-gate check; persist/restore; profile validation.
 - `engine/src/autotrader/exits.py` — restructure into two independent checks: hard stop (unconditional) and dynamic evaluator (hold/exit/take-profit); dynamic never receives stop data.
@@ -104,6 +106,7 @@ Per tick, per open position, in this exact order:
 - Unit — sizing: `floor(0.01 × equity / (price × 0.05))`, integer capping near budget edges, zero/insufficient budget → 0 shares; per-position ≈ 20%, ceiling 100%.
 - Unit — hard-stop precedence: price ≤ `entry × 0.95` → `stop_loss`, regardless of dynamic output; dynamic must not be called for the stopped position.
 - Unit — dynamic decisions: trend-hold beats a dip (stronger regime + rising SMA → `hold` below entry but above stop); `exit_early` only on real breakdown; take-profit held while dynamic says `hold`.
+- Unit — dynamic evaluator failure → no-op hold: sentiment/Ollama call raises or times out on an open position → position resolves to `hold` (never `exit_early`/`take_profit`); the hard stop-loss remains active and independent.
 - Unit — realized-loss gate: stop-outs accumulate `daily_realized_loss_pct`; at ≥5% new entries return `max_daily_risk_pct`; open positions still exit; damage-keyed not streak-keyed.
 - Unit — persistence: `daily_realized_loss_pct` survives `_state()` → restore round-trip; mid-session restart keeps gate intact.
 - Unit — floor: −25% equity halts session outright.
