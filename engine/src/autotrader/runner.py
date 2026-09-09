@@ -156,6 +156,13 @@ class Runner:
                     return False
                 continue
             if not self._valid_snapshot(snapshot, pending):
+                if self._uncertain_stale_collision(pending, snapshot):
+                    # For an unbound intent, a client-ID match that disagrees on
+                    # side/qty/ticker is a stale-collision under a reused client ID,
+                    # not our order. Hold as uncertain (retry later) while ACTIVE.
+                    if self.risk is not None and self.risk.state.value != "active":
+                        return False
+                    continue
                 self._fail_closed("invalid_order_snapshot")
                 return False
             if pending.id == pending.client_order_id and snapshot.id != pending.id:
@@ -473,6 +480,22 @@ class Runner:
         return snapshot.filled_qty == 0 or (
             self._positive(snapshot.filled_avg_price)
             and self._same_number(snapshot.filled_notional, snapshot.filled_qty * snapshot.filled_avg_price)
+        )
+
+    def _uncertain_stale_collision(self, pending: Order, snapshot: Order) -> bool:
+        """True when an unbound intent's client-ID lookup returned a broker order that
+        disagrees on identity (side/qty/ticker/broker id) — a stale collision under a
+        reused client order id, not our own order. Such a snapshot is uncertain: the
+        engine must not treat it as a validated fill nor as a fatal mismatch."""
+        if pending.id != pending.client_order_id:
+            return False
+        if pending.side is not Side.BUY:
+            return False
+        return (
+            snapshot.id != pending.id
+            or snapshot.side is not pending.side
+            or not self._same_number(snapshot.qty, pending.qty)
+            or snapshot.ticker != pending.ticker
         )
 
     def _snapshot_is_fresh(self, observed_at) -> bool:

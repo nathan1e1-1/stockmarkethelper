@@ -427,6 +427,36 @@ def test_submission_timeout_broker_acknowledged_next_tick_binds():
     assert risk.session_entry_count == 1
 
 
+def test_stale_client_id_collision_does_not_halt_unbound_intent():
+    """A same-session re-entry attempt that never reached the broker reuses the client
+    order ID. Alpaca's client-ID lookup then returns the OLD (stale) broker order under
+    that ID with a different qty. For an unbound intent (id == client id), a client-ID
+    match that disagrees on qty/side is NOT our order — treat it as uncertain-hold
+    (continue while ACTIVE), never a fatal invalid_order_snapshot."""
+    runner, risk, executor, _ = paper_runner()
+
+    def timeout(*_):
+        raise TimeoutError("submission outcome unknown")
+
+    executor.submit_limit_buy = timeout
+    runner.run_once(["AAPL"])
+    assert risk.state is RiskState.ACTIVE
+    assert len(runner.pending_orders) == 1
+    assert runner.pending_orders[0].id == runner.pending_orders[0].client_order_id
+
+    # Broker client-ID lookup returns the STALE order (different broker id AND qty).
+    executor.orders["stale-broker-order"] = Order(
+        id="stale-broker-order", ticker="AAPL", side=Side.BUY, qty=99, status="cancelled",
+        client_order_id="entry-2026-09-01-AAPL", observed_at=NOW,
+        filled_qty=None, filled_notional=None,
+    )
+
+    assert runner.reconcile_orders() is True
+    assert risk.state is RiskState.ACTIVE
+    assert risk.halt_reason is None
+    assert len(runner.pending_orders) == 1
+
+
 def test_inconsistent_broker_fill_average_halts_without_booking():
     runner, risk, executor, _ = paper_runner()
     runner.run_once(["AAPL"])
