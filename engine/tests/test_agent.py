@@ -57,3 +57,24 @@ def test_agent_decide_returns_hold_on_error():
 def test_agent_complete_returns_text():
     agent = OllamaAgent(base_url="http://x", model="m", session=FakeSession("hi"))
     assert agent.complete("hello") == "hi"
+
+
+def test_agent_complete_requests_json_format():
+    """The chat endpoint's topic-selector step parses llm.complete() output as JSON.
+    complete() MUST request structured JSON from the model (format: json), or the model
+    returns prose and _selected_chat_topics raises -> chat 503s as 'unavailable'."""
+    captured = {}
+
+    class CaptureSession(FakeSession):
+        def __init__(self, text):
+            super().__init__(text)
+            self.captured = captured
+
+        def post(self, url, json, timeout):
+            captured.update(json)
+            return FakeResponse(self._text)
+
+    agent = OllamaAgent(base_url="http://x", model="m", session=CaptureSession('{"topics": ["positions"]}'))
+    assert agent.complete("selector prompt") == '{"topics": ["positions"]}'
+    assert captured.get("format") == "json"
+    assert captured.get("stream") is False

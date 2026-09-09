@@ -140,15 +140,30 @@ class EngineLifecycle:
             self.risk.begin_halt("invalid_account_snapshot")
             return
         self._account_valid = True
-        self.risk.day_start_equity = snapshot.equity
-        self.risk.peak_equity = snapshot.equity
-        self.runner.equity = Equity(
-            snapshot.equity,
-            snapshot.equity,
-            snapshot.equity,
-            self._session_id(self._now()),
-        )
-        if self.risk.state is RiskState.ACTIVE and self.risk.session_id != self._session_id(self._now()):
+        session = self._session_id(self._now())
+        same_session = loaded.equity is not None and loaded.equity.day == session
+        if same_session:
+            # Same-session restart: preserve the persisted day-start baseline and peak so
+            # day P&L accounting survives a mid-day engine restart. Only the live equity is
+            # refreshed from the broker snapshot.
+            persisted_baseline = loaded.equity.day_start_equity
+            persisted_peak = max(loaded.equity.peak_equity, snapshot.equity)
+            live_equity = snapshot.equity
+            self.risk.day_start_equity = persisted_baseline
+            self.risk.peak_equity = persisted_peak
+            self.runner.equity = Equity(live_equity, persisted_baseline, persisted_peak, session)
+        else:
+            # Fresh session (or no persisted equity): the broker's open equity is the
+            # authoritative new day-start baseline.
+            self.risk.day_start_equity = snapshot.equity
+            self.risk.peak_equity = snapshot.equity
+            self.runner.equity = Equity(
+                snapshot.equity,
+                snapshot.equity,
+                snapshot.equity,
+                session,
+            )
+        if self.risk.state is RiskState.ACTIVE and self.risk.session_id != session:
             self._requires_rearm = True
             self.risk.begin_halt("prior_session_requires_rearm")
 

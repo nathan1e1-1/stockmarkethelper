@@ -232,6 +232,22 @@ def test_startup_uses_a_fresh_broker_equity_snapshot_as_the_risk_baseline():
     assert runner.equity.equity == 80_000.0
 
 
+def test_same_session_restart_preserves_persisted_day_start_baseline():
+    """A same-session restart must NOT clobber day_start_equity with the current broker
+    equity (which zeroes the dashboard's day P&L). The persisted baseline must survive."""
+    loaded = State(
+        equity=Equity(60_000.0, 100_000.0, 100_000.0, "2026-09-02"),  # current 60k, day-start 100k
+        risk_state=RiskState.ACTIVE,
+        session_id="2026-09-02",
+    )
+    engine, risk, runner, _, _ = lifecycle(store=Store(loaded), executor=Executor(equity=60_000.0))
+
+    assert engine.startup_reconcile() is True
+
+    assert risk.day_start_equity == 100_000.0, "day-start baseline must be preserved on same-day restart"
+    assert runner.equity.equity == 60_000.0
+
+
 def test_persisted_position_missing_from_broker_stays_halting_and_cannot_scan():
     loaded = State(
         equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
