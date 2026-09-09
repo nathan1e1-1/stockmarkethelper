@@ -1055,3 +1055,45 @@ def test_status_without_risk_reports_nulls():
     assert body["daily_realized_loss_pct"] is None
     assert body["daily_risk_gate_tripped"] is None
     assert body["open_slots"] is None
+
+
+def test_status_positions_include_live_price_from_pnl_attribution():
+    """B: /api/status positions must carry live current_price / unrealized_pnl from the
+    fast-published pnl_attribution, so the 5s app poll reflects near-real-time prices
+    instead of only the 60s scan snapshot."""
+    from autotrader.models import Position
+
+    state = SharedState()
+    state.equity = Equity(equity=100_000.0, day_start_equity=100_000.0, peak_equity=100_000.0, day="d")
+    state.positions = [Position(ticker="NVDA", qty=10, avg_entry_price=100.0)]
+    state.pnl_attribution = {
+        "open_positions": [
+            {
+                "ticker": "NVDA",
+                "qty": 10.0,
+                "avg_entry_price": 100.0,
+                "current_price": 104.5,
+                "unrealized_pnl": 45.0,
+                "unrealized_pnl_pct": 4.5,
+            }
+        ],
+    }
+    client = TestClient(create_app(state))
+    body = client.get("/api/status").json()
+    pos = body["positions"][0]
+    assert pos["ticker"] == "NVDA"
+    assert pos["current_price"] == pytest.approx(104.5)
+    assert pos["unrealized_pnl"] == pytest.approx(45.0)
+
+
+def test_status_positions_default_to_no_live_price_when_attribution_missing():
+    from autotrader.models import Position
+
+    state = SharedState()
+    state.equity = Equity(equity=100_000.0, day_start_equity=100_000.0, peak_equity=100_000.0, day="d")
+    state.positions = [Position(ticker="NVDA", qty=10, avg_entry_price=100.0)]
+    client = TestClient(create_app(state))
+    body = client.get("/api/status").json()
+    pos = body["positions"][0]
+    assert pos["ticker"] == "NVDA"
+    assert pos.get("current_price") is None

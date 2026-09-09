@@ -90,6 +90,40 @@ def publish_pnl_attribution(shared, provider, equity, positions, closed_trades) 
     shared.pnl_attribution = enrich_pnl_snapshot(snapshot, bars_by_ticker, news_by_ticker)
 
 
+def refresh_live_prices(shared, provider) -> None:
+    """One batched price refresh into the already-published P&L snapshot.
+
+    Only current_price / unrealized_* fields are updated in place, keeping the heavy
+    bars+news enrichment on the 60s scan cadence. Position records are never replaced,
+    so there is no write-ordering race with concurrent scan publishes.
+    """
+    attribution = shared.pnl_attribution
+    if not attribution:
+        return
+    open_positions = attribution.get("open_positions")
+    if not open_positions:
+        return
+    tickers = [record["ticker"] for record in open_positions if record.get("ticker")]
+    if not tickers:
+        return
+    try:
+        prices = provider.latest_prices(tickers)
+    except Exception as exc:
+        print(f"[error] fast price publisher: {exc}")
+        return
+    for record in open_positions:
+        current_price = prices.get(record.get("ticker"))
+        record["current_price"] = current_price
+        if current_price is None:
+            record["unrealized_pnl"] = None
+            record["unrealized_pnl_pct"] = None
+            continue
+        entry = record.get("avg_entry_price")
+        qty = record.get("qty") or 0.0
+        record["unrealized_pnl"] = (current_price - entry) * qty if entry else None
+        record["unrealized_pnl_pct"] = ((current_price - entry) / entry) * 100 if entry else None
+
+
 def restore_same_day_state(loaded: State, day: str, runner, risk) -> bool:
     if not same_day(loaded, day):
         return False
@@ -211,6 +245,56 @@ def main() -> None:
         sync_and_scan(datetime.now(EASTERN).strftime("%Y-%m-%d"))
         generate_summary()
         return
+
+    def refresh_live_prices() -> None:
+        """One batch price refresh into the already-published P&L snapshot.
+
+        Only current_price / unrealized_* fields are updated in place, keeping the heavy
+        bars+news enrichment on the 60s scan cadence. Position objects are never replaced,
+        so no write-ordering race with concurrent scan publishes.
+        """
+        attribution = shared.pnl_attribution
+        if not attribution:
+            return
+        open_positions = attribution.get("open_positions")
+        if not open_positions:
+            return
+        tickers = [record["ticker"] for record in open_positions if record.get("ticker")]
+        try:
+            prices = provider.latest_prices(tickers)
+        except Exception as exc:
+            print(f"[error] fast price publisher: {exc}")
+            return
+        for record in open_positions:
+            current_price = prices.get(record.get("ticker"))
+            record["current_price"] = current_price
+            if current_price is None:
+                record["unrealized_pnl"] = None
+                record["unrealized_pnl_pct"] = None
+                continue
+            entry = record.get("avg_entry_price")
+            qty = record.get("qty") or 0.0
+            record["unrealized_pnl"] = (current_price - entry) * qty if entry else None
+            record["unrealized_pnl_pct"] = (
+                ((current_price - entry) / entry) * 100 if entry else None
+            )
+
+    def fast_price_publisher(interval_seconds: float = 5.0) -> None:
+        """Refresh live position prices at a fast cadence, independent of the 60s scan
+        tick, so the 5s app poll reflects near-real-time prices.
+
+        Strictly read-only for trading state: only publishes prices into the shared
+        snapshot; never touches lifecycle, risk, or order submission.
+        """
+        while True:
+            if is_market_open(datetime.now(EASTERN)):
+                try:
+                    refresh_live_prices(shared, provider)
+                except Exception as exc:
+                    print(f"[error] fast price publisher: {exc}")
+            time.sleep(interval_seconds)
+
+    threading.Thread(target=fast_price_publisher, kwargs={"interval_seconds": 5.0}, daemon=True).start()
 
     summary_done = False
 

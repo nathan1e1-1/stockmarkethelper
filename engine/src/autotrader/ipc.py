@@ -200,9 +200,21 @@ def create_app(state: SharedState, provider=None, llm=None) -> FastAPI:
     @app.get("/api/status")
     def status() -> dict[str, Any]:
         eq = state.equity
+        live_by_ticker = {}
+        if state.pnl_attribution:
+            for record in state.pnl_attribution.get("open_positions", []):
+                live_by_ticker[record.get("ticker")] = record
+        positions = []
+        for position in state.positions:
+            record = asdict(position)
+            live = live_by_ticker.get(position.ticker)
+            record["current_price"] = live.get("current_price") if live else None
+            record["unrealized_pnl"] = live.get("unrealized_pnl") if live else None
+            record["unrealized_pnl_pct"] = live.get("unrealized_pnl_pct") if live else None
+            positions.append(record)
         body = {
             "equity": asdict(eq) if eq else None,
-            "positions": [asdict(p) for p in state.positions],
+            "positions": positions,
             "decisions": [asdict(d) for d in state.decisions],
             "closed_trades": [asdict(t) for t in state.closed_trades],
             "equity_history": state.equity_history,
