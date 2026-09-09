@@ -97,7 +97,10 @@ class Runner:
     def _submit_reserved_entry(self, ticker: str) -> None:
         quote = self._call_with_now(self.provider.latest_quote, ticker)
         if not self._valid_quote(quote, ticker):
-            self._fail_closed("invalid_quote")
+            # A transiently stale/invalid entry quote (thin IEX feed) is a per-ticker data
+            # condition, not a trading-integrity failure. Skip this entry and keep the
+            # session ACTIVE so other signals can still trade.
+            print(f"[scan] {ticker}: invalid quote, skipping entry")
             return
         qty = self.risk.position_size(ticker, quote.price, self.equity.equity)
         admission = self.risk.reserve_entry(ticker, qty, quote.price, self.equity.equity, quote.observed_at)

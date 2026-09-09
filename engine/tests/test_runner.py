@@ -602,7 +602,8 @@ def test_stale_or_future_quote_source_timestamp_blocks_submission(source_timesta
     runner.run_once(["AAPL"])
 
     assert executor.limit_buys == []
-    assert risk.state is RiskState.HALTING
+    assert risk.state is RiskState.ACTIVE
+    assert risk.halt_reason is None
 
 
 def test_runner_passes_its_clock_to_quote_provider_when_supported():
@@ -913,3 +914,23 @@ def test_terminal_cancelled_sell_with_zero_fills_is_absorbed_not_halting():
     assert runner.pending_orders == []
     assert [(position.ticker, position.qty) for position in risk.positions] == [("AAPL", 10)]
     assert risk.state is RiskState.ACTIVE
+
+
+def test_stale_entry_quote_skips_ticker_without_halting_session():
+    """A transiently stale entry quote (thin IEX feed) must skip that ticker's entry and
+    keep the session ACTIVE, not fail-closed the whole engine."""
+    runner, risk, executor, _ = paper_runner()
+
+    class StaleEntryProvider(FreshProvider):
+        def latest_quote(self, ticker, *, now=None):
+            from autotrader.models import Quote
+            return Quote(
+                ticker=ticker, price=100.0, source_timestamp=NOW - timedelta(seconds=121), observed_at=NOW,
+            )
+
+    runner.provider = StaleEntryProvider()
+    runner.run_once(["AAPL"])
+
+    assert executor.limit_buys == []
+    assert risk.state is RiskState.ACTIVE
+    assert risk.halt_reason is None
