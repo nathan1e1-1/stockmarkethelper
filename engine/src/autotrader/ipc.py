@@ -114,6 +114,31 @@ def _selected_chat_topics(raw: str) -> list[str]:
     return selected
 
 
+def _fallback_chat_topics(question: str) -> list[str]:
+    """Deterministic, keyword-based topic selection used when the LLM topic selector is
+    malformed/unavailable. Guarantees the chat renders safe factual topics instead of
+    failing closed with a 503."""
+    lowered = (question or "").casefold()
+    # Normalize the P&L spelling (ampersand and punctuation variants) so "P&L", "PnL",
+    # "p/l", "p l" all match.
+    normalized = lowered.replace("&", "n").replace("/", "n").replace(" ", "")
+    topics: list[str] = ["account", "market_session", "risk"]
+    if any(word in normalized for word in ("pnl", "profit", "loss", "gain", "return", "performance", "down", "up")):
+        topics = [topic for topic in topics if topic != "account"]
+        topics.insert(0, "pnl")
+        topics.append("pnl_explanation")
+    if any(word in lowered for word in ("position", "holding", "hold", "owned", "portfolio")):
+        if "positions" not in topics:
+            topics.append("positions")
+    if any(word in lowered for word in ("decision", "decided", "signal", "bought", "sold", "trade", "trades")):
+        if "decisions" not in topics:
+            topics.append("decisions")
+    if any(word in lowered for word in ("risk", "stop", "halt", "kill", "drawdown", "exposure", "slot")):
+        if "risk" not in topics:
+            topics.append("risk")
+    return topics
+
+
 def _currency_amount(value: int | float) -> str:
     return f"-${abs(value):,.2f}" if value < 0 else f"${value:,.2f}"
 
@@ -283,6 +308,14 @@ def create_app(state: SharedState, provider=None, llm=None) -> FastAPI:
             if selector.strip() == _UNAVAILABLE_LLM_RESPONSE:
                 raise RuntimeError("llm unavailable")
             topics = _selected_chat_topics(selector)
+        except Exception as error:
+            # The LLM selector is a convenience, not a correctness gate: a malformed or
+            # prose answer must degrade to a deterministic keyword-based topic selection,
+            # never take the whole chat down as 'unavailable'. Only a truly missing LLM
+            # (llm is None) is fatal (handled above).
+            print(f"[warn] chat topic selector degraded to keyword fallback: {error}")
+            topics = _fallback_chat_topics(request.question)
+        try:
             response_parts = _render_chat_topics(state, topics, request.question, provider)
             if not response_parts:
                 return {"answer": _SAFE_READ_ONLY_LIMITATION, "disclaimer": _INFORMATIONAL_DISCLAIMER}
@@ -295,6 +328,8 @@ def create_app(state: SharedState, provider=None, llm=None) -> FastAPI:
                 if structured is not None:
                     response.update(structured)
             return response
+        except HTTPException:
+            raise
         except Exception as error:
             raise HTTPException(
                 status_code=503,
