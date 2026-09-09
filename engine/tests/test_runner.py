@@ -377,7 +377,54 @@ def test_timeout_intent_reconciles_by_client_id_without_resubmitting():
     assert runner.reconcile_orders() is True
     assert executor.limit_buys == []
     assert [(position.ticker, position.qty) for position in risk.positions] == [("AAPL", 1)]
-    assert risk.state is RiskState.HALTING
+    assert risk.state is RiskState.ACTIVE
+
+
+def test_submission_timeout_stays_active_so_client_lookup_can_retry():
+    """A transient submit/network failure must NOT permanently halt: the intent stays durable
+    and the engine stays ACTIVE, so the next reconcile's client-ID lookup can bind a broker
+    order that did land, or hold until it appears."""
+    runner, risk, executor, _ = paper_runner()
+
+    def timeout(*_):
+        raise TimeoutError("submission outcome unknown")
+
+    executor.submit_limit_buy = timeout
+    runner.run_once(["AAPL"])
+
+    assert risk.state is RiskState.ACTIVE
+    assert risk.halt_reason is None
+    assert len(runner.pending_orders) == 1
+
+    # Broker never received it; with no record, reconcile keeps holdings ACTIVE (retry later).
+    assert runner.reconcile_orders() is True
+    assert risk.state is RiskState.ACTIVE
+    assert len(runner.pending_orders) == 1
+    assert risk.reservations
+
+
+def test_submission_timeout_broker_acknowledged_next_tick_binds():
+    """If the broker DID accept despite the timeout, the client-ID lookup on the next
+    reconcile must bind the acknowledgement and keep the engine ACTIVE."""
+    runner, risk, executor, _ = paper_runner()
+
+    def timeout(*_):
+        raise TimeoutError("submission outcome unknown")
+
+    executor.submit_limit_buy = timeout
+    runner.run_once(["AAPL"])
+    assert risk.state is RiskState.ACTIVE
+
+    executor.orders["buy-late-ack"] = Order(
+        id="buy-late-ack", ticker="AAPL", side=Side.BUY, qty=2, status="accepted",
+        client_order_id="entry-2026-09-01-AAPL", observed_at=NOW,
+        filled_qty=0.0, filled_notional=0.0,
+    )
+
+    assert runner.reconcile_orders() is True
+    assert risk.state is RiskState.ACTIVE
+    assert [order.id for order in runner.pending_orders] == ["buy-late-ack"]
+    assert risk.session_entry_count == 1
 
 
 def test_inconsistent_broker_fill_average_halts_without_booking():

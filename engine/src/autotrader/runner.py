@@ -127,7 +127,10 @@ class Runner:
             )
         except Exception:
             # The client ID is already durable. It is the only safe retry key.
-            self._fail_closed("entry_submission_unknown")
+            # Do NOT halt: reconciliation re-looks-up by client ID each tick while ACTIVE,
+            # binding a broker order that did land or holding until it appears. Halting here
+            # would make a transient network failure permanently halt the session.
+            self._persist()
             return
         if not self._valid_acknowledgement(acknowledged, intent):
             self._fail_closed("invalid_entry_acknowledgement")
