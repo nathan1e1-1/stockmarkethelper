@@ -237,6 +237,11 @@ class EngineLifecycle:
                     found = self._call(self.executor.order, pending.id)
             except Exception:
                 return True
+            if pending.id == pending.client_order_id:
+                # Unbound intent: a client-ID lookup returning no record is an uncertain
+                # submission the runner holds for retry, never a missing broker order.
+                if found is None:
+                    continue
             if found is None or not self._fresh(getattr(found, "observed_at", None)):
                 return True
         return False

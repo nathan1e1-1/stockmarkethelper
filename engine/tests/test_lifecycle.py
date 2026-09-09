@@ -336,6 +336,58 @@ def test_ensure_exits_skips_broker_position_with_local_pending_buy():
     assert runner.pending_orders[0].side is Side.BUY
 
 
+def test_unbound_intent_without_broker_record_is_not_missing_local_order():
+    """An unbound (submitted, id==client) intent whose client-ID lookup returns no broker
+    record is an uncertain submission that the runner holds for retry. It must NOT be
+    reported as a missing local order (which would fatal-halt reconciliation)."""
+    from autotrader.models import Reservation
+
+    local_pending = Order(
+        "entry-2026-09-02-AAPL", "AAPL", Side.BUY, 2, status="submitted",
+        client_order_id="entry-2026-09-02-AAPL", timestamp=NOW, observed_at=NOW,
+        filled_qty=0.0, filled_notional=0.0,
+    )
+    reservation = Reservation("entry-2026-09-02-AAPL", "AAPL", 2.0, 100.0, NOW)
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        risk_state=RiskState.ACTIVE,
+        session_id="2026-09-02",
+        reservations=[reservation],
+        pending_orders=[local_pending],
+    )
+    # Broker has no record for this client ID.
+    executor = Executor(positions=[], orders=[])
+    engine, risk, runner, executor, _ = lifecycle(store=Store(loaded), executor=executor)
+
+    engine._restore_state()
+
+    assert engine._missing_local_orders() is False
+    assert risk.state is RiskState.ACTIVE
+
+
+def test_bound_intent_without_broker_record_still_counts_as_missing():
+    """An acknowledged (bound) pending order whose broker-id lookup returns nothing is a
+    genuine missing-broker-order and MUST still halt reconciliation (fail-closed)."""
+    local_pending = Order(
+        "broker-ack-1", "AAPL", Side.BUY, 2, status="accepted",
+        client_order_id="entry-2026-09-02-AAPL", timestamp=NOW, observed_at=NOW,
+        filled_qty=0.0, filled_notional=0.0,
+    )
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        risk_state=RiskState.HALTING,
+        session_id="2026-09-02",
+        session_entry_count=1,
+        pending_orders=[local_pending],
+    )
+    executor = Executor(positions=[], orders=[])
+    engine, risk, runner, executor, _ = lifecycle(store=Store(loaded), executor=executor)
+
+    engine._restore_state()
+
+    assert engine._missing_local_orders() is True
+
+
 class MultiEntryConfig(Config):
     max_position_pct = 0.05
     max_gross_exposure_pct = 0.05
