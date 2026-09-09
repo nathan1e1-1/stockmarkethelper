@@ -277,6 +277,65 @@ def test_restored_active_prior_session_requires_local_next_session_rearm():
     assert risk.state is RiskState.ACTIVE
 
 
+def test_local_pending_buy_backed_position_is_not_treated_as_orphan():
+    """A broker position created by OUR OWN in-flight acknowledged buy (fill not yet reconciled)
+    must not be orphan-flushed. The earlier design decided orphan-ness on a pre-reconcile snapshot,
+    then _ensure_exits force-sold the position the engine itself had just bought."""
+    local_pending = Order(
+        "buy-broker-1", "AAPL", Side.BUY, 4, status="accepted", client_order_id="entry-2026-09-02-AAPL",
+        timestamp=NOW, observed_at=NOW, filled_qty=0.0, filled_notional=0.0,
+    )
+    from autotrader.models import Reservation
+    reservation = Reservation("entry-2026-09-02-AAPL", "AAPL", 4.0, 100.0, NOW)
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        risk_state=RiskState.ACTIVE,
+        session_id="2026-09-02",
+        session_entry_count=1,
+        reservations=[reservation],
+        pending_orders=[local_pending],
+    )
+    # Broker truth: the buy already filled into a position; the committed broker buy order is filled.
+    broker_filled_buy = Order(
+        "buy-broker-1", "AAPL", Side.BUY, 4, status="filled", client_order_id="entry-2026-09-02-AAPL",
+        timestamp=NOW, observed_at=NOW, filled_qty=4.0, filled_notional=400.0, filled_avg_price=100.0,
+    )
+    executor = Executor(positions=[Position("AAPL", 4, 100.0)], orders=[broker_filled_buy])
+    engine, risk, runner, executor, _ = lifecycle(store=Store(loaded), executor=executor)
+
+    assert engine.startup_reconcile() is True
+    assert risk.state is RiskState.ACTIVE
+    assert executor.exit_requests == []
+    assert [(position.ticker, position.qty) for position in risk.positions] == [("AAPL", 4)]
+
+
+def test_ensure_exits_skips_broker_position_with_local_pending_buy():
+    """Direct guard test for the destructive NVDA bug: during a HALTING cleanup, _ensure_exits
+    must not orphan-flush a broker position that our own in-flight BUY is about to reconcile."""
+    position = Position("NVDA", 121, 224.43, opened_at=NOW)
+    local_pending_buy = Order(
+        "buy-broker-1", "NVDA", Side.BUY, 121, status="accepted",
+        client_order_id="entry-2026-09-02-NVDA", timestamp=NOW, observed_at=NOW,
+        filled_qty=0.0, filled_notional=0.0,
+    )
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        risk_state=RiskState.HALTING,
+        session_id="2026-09-02",
+        positions=[position],
+        pending_orders=[local_pending_buy],
+    )
+    executor = Executor(positions=[position], orders=[])
+    engine, risk, runner, executor, _ = lifecycle(store=Store(loaded), executor=executor)
+    engine._restore_state()
+
+    engine._ensure_exits(executor.positions_value)
+
+    assert executor.exit_requests == []
+    assert len(runner.pending_orders) == 1
+    assert runner.pending_orders[0].side is Side.BUY
+
+
 class MultiEntryConfig(Config):
     max_position_pct = 0.05
     max_gross_exposure_pct = 0.05

@@ -166,11 +166,16 @@ class EngineLifecycle:
 
         local_orders = {order.id: order for order in self.runner.pending_orders}
         local_client_ids = {order.client_order_id for order in self.runner.pending_orders}
+        pending_buy_tickers = {order.ticker for order in self.runner.pending_orders if order.side is Side.BUY}
         orphan_orders = [order for order in orders if order.id not in local_orders and order.client_order_id not in local_client_ids]
         missing_local_orders = self._missing_local_orders()
         broker_by_ticker = {position.ticker: position for position in positions}
         local_by_ticker = {position.ticker: position for position in self.risk.positions}
-        orphan_positions = [position for ticker, position in broker_by_ticker.items() if not self._same_position(local_by_ticker.get(ticker), position)]
+        orphan_positions = [
+            position
+            for ticker, position in broker_by_ticker.items()
+            if ticker not in pending_buy_tickers and not self._same_position(local_by_ticker.get(ticker), position)
+        ]
         missing_broker_positions = [position for ticker, position in local_by_ticker.items() if not self._same_position(broker_by_ticker.get(ticker), position)]
 
         if orphan_orders or missing_local_orders or orphan_positions or missing_broker_positions:
@@ -277,7 +282,12 @@ class EngineLifecycle:
         pending_sell_tickers = {order.ticker for order in self.runner.pending_orders if order.side is Side.SELL}
         pending_sell_tickers.update(blocked_sells or set())
         known = {position.ticker: position for position in self.risk.positions}
+        # A broker position backed by our own in-flight acknowledged BUY is a fill awaiting
+        # reconciliation, not an orphan. Flushing it force-sells a position we just bought.
+        pending_buy_tickers = {order.ticker for order in self.runner.pending_orders if order.side is Side.BUY}
         for position in broker_positions:
+            if position.ticker in pending_buy_tickers:
+                continue
             if position.ticker not in known or not self._same_position(known[position.ticker], position):
                 self.risk.positions = [item for item in self.risk.positions if item.ticker != position.ticker] + [position]
             if position.ticker not in pending_sell_tickers:

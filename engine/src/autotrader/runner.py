@@ -195,7 +195,9 @@ class Runner:
             return False
         status = self._status(snapshot.status)
         if status in _TERMINAL_STATUSES:
-            applied = self.risk.apply_terminal_order(snapshot.id, status, snapshot.filled_qty, snapshot.filled_notional)
+            filled_qty = snapshot.filled_qty if snapshot.filled_qty is not None else 0.0
+            filled_notional = snapshot.filled_notional if snapshot.filled_notional is not None else 0.0
+            applied = self.risk.apply_terminal_order(snapshot.id, status, filled_qty, filled_notional)
         else:
             applied = self.risk.apply_order_delta(snapshot.id, snapshot.filled_qty, snapshot.filled_notional)
         if not applied:
@@ -216,8 +218,10 @@ class Runner:
         if status == "filled" and not self._same_number(snapshot.filled_qty, pending.qty):
             self._fail_closed("invalid_terminal_sell_fill")
             return False
-        delta_qty = snapshot.filled_qty - pending.processed_filled_qty
-        delta_notional = snapshot.filled_notional - pending.processed_filled_notional
+        filled_qty = snapshot.filled_qty if snapshot.filled_qty is not None else 0.0
+        filled_notional = snapshot.filled_notional if snapshot.filled_notional is not None else 0.0
+        delta_qty = filled_qty - pending.processed_filled_qty
+        delta_notional = filled_notional - pending.processed_filled_notional
         if delta_qty < 0 or delta_notional < 0 or (delta_qty == 0) != (delta_notional == 0):
             self._fail_closed("decreasing_or_invalid_sell_fill")
             return False
@@ -455,6 +459,8 @@ class Runner:
             or not self._snapshot_is_fresh(snapshot.observed_at)
         ):
             return False
+        if status in _TERMINAL_STATUSES and snapshot.filled_qty is None and snapshot.filled_notional is None:
+            return True
         if not (self._nonnegative(snapshot.filled_qty) and self._nonnegative(snapshot.filled_notional)):
             return False
         if snapshot.filled_qty > pending.qty:

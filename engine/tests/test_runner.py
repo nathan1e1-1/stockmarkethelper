@@ -785,3 +785,54 @@ def test_initial_run_once_still_halts_in_daily_stop_band():
     runner.run_once([])
     assert risk.state is not RiskState.ACTIVE
     assert risk.halt_reason == "daily_stop"
+
+
+def test_terminal_cancelled_buy_with_zero_fills_is_absorbed_not_halting():
+    """Root-cause regression: a broker-confirmed cancelled buy (zero fills, filled_qty/notional
+    normalized to None) must be absorbable as a no-op trade, not permanently halt the engine."""
+    runner, risk, executor, _ = paper_runner()
+    runner.run_once(["AAPL"])
+    executor.orders["buy-1"] = Order(
+        id="buy-1", ticker="AAPL", side=Side.BUY, qty=2, status="cancelled",
+        client_order_id="entry-2026-09-01-AAPL", filled_qty=None, filled_notional=None,
+        filled_avg_price=None, observed_at=NOW,
+    )
+
+    assert runner.reconcile_orders() is True
+    assert runner.pending_orders == []
+    assert risk.positions == []
+    assert risk.state is RiskState.ACTIVE
+    assert risk.halt_reason is None
+
+
+def test_terminal_rejected_buy_with_zero_fills_is_absorbed_not_halting():
+    runner, risk, executor, _ = paper_runner()
+    runner.run_once(["AAPL"])
+    executor.orders["buy-1"] = Order(
+        id="buy-1", ticker="AAPL", side=Side.BUY, qty=2, status="rejected",
+        client_order_id="entry-2026-09-01-AAPL", filled_qty=None, filled_notional=None,
+        filled_avg_price=None, observed_at=NOW,
+    )
+
+    assert runner.reconcile_orders() is True
+    assert runner.pending_orders == []
+    assert risk.positions == []
+    assert risk.state is RiskState.ACTIVE
+
+
+def test_terminal_cancelled_sell_with_zero_fills_is_absorbed_not_halting():
+    """A sell that is terminal (cancelled) with zero fills must not block; position stays intact."""
+    runner, risk, executor, _ = paper_runner()
+    risk.positions = [Position(ticker="AAPL", qty=10, avg_entry_price=100, opened_at=NOW)]
+    runner._close(risk.positions[0], price=1.0, reason="stop_loss")
+    executor.orders["sell-1"] = Order(
+        id="sell-1", ticker="AAPL", side=Side.SELL, qty=10, status="cancelled",
+        client_order_id=runner.pending_orders[0].client_order_id,
+        filled_qty=None, filled_notional=None, filled_avg_price=None,
+        observed_at=NOW, timestamp=NOW,
+    )
+
+    assert runner.reconcile_orders() is True
+    assert runner.pending_orders == []
+    assert [(position.ticker, position.qty) for position in risk.positions] == [("AAPL", 10)]
+    assert risk.state is RiskState.ACTIVE
