@@ -563,3 +563,73 @@ def test_true_safety_halt_survives_repeated_broker_divergence():
     assert risk.state is not RiskState.ACTIVE
     assert risk.halt_reason == "hard_stop"
     assert executor.exit_requests == []
+
+
+class BlockedOrdersExecutor(Executor):
+    """Simulates a transient broker order-snapshot failure (open_orders returns None)."""
+
+    def __init__(self, positions=None, orders=None, equity=100_000.0, *, block_orders=False):
+        super().__init__(positions=positions, orders=orders, equity=equity)
+        self.block_orders = block_orders
+
+    def open_orders(self, *, now=None):
+        if self.block_orders:
+            return None
+        return super().open_orders(now=now)
+
+
+def test_persisted_safety_halt_survives_account_snapshot_failure():
+    """A persisted hard_stop must survive an account snapshot failure at restore."""
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        risk_state=RiskState.HALTING,
+        session_id="2026-09-02",
+        halt_reason="hard_stop",
+    )
+    executor = Executor(positions=[], orders=[], equity=0.0)  # account snapshot fails (non-positive)
+    engine, risk, runner, executor, _ = lifecycle(store=Store(loaded), executor=executor)
+
+    engine.startup_reconcile()
+
+    assert risk.state is not RiskState.ACTIVE
+    assert risk.halt_reason in ("hard_stop", "invalid_account_snapshot")
+
+
+def test_persisted_safety_halt_survives_invalid_broker_snapshot():
+    """A persisted daily_stop must survive a transient broker order-snapshot failure,
+    even after the snapshot recovers (recovery must not clear the safety halt)."""
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        risk_state=RiskState.HALTING,
+        session_id="2026-09-02",
+        halt_reason="daily_stop",
+    )
+    executor = BlockedOrdersExecutor(positions=[], orders=[], block_orders=True)
+    engine, risk, runner, executor, _ = lifecycle(store=Store(loaded), executor=executor)
+
+    engine.startup_reconcile()
+
+    assert risk.state is not RiskState.ACTIVE
+    # Once the broker snapshot recovers, the genuine safety halt must still survive.
+    executor.block_orders = False
+    engine._reconcile_and_cleanup()
+
+    assert risk.state is not RiskState.ACTIVE
+    assert risk.halt_reason == "daily_stop"
+
+
+def test_recovering_state_with_safety_reason_is_not_recovered():
+    """A persisted RECOVERING state carrying a genuine HALT reason must stay
+    fail-closed, mirroring the HALTING guard."""
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        risk_state=RiskState.RECOVERING,
+        session_id="2026-09-02",
+        halt_reason="hard_stop",
+    )
+    engine, risk, runner, executor, _ = lifecycle(store=Store(loaded))
+
+    engine.startup_reconcile()
+
+    assert risk.state is not RiskState.ACTIVE
+    assert risk.halt_reason == "hard_stop"

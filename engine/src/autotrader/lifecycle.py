@@ -76,7 +76,8 @@ class EngineLifecycle:
         snapshot = self._account_snapshot(now)
         if snapshot is None:
             self._account_valid = False
-            self._begin_halt("invalid_account_snapshot")
+            if not self._genuine_halt_latched():
+                self._begin_halt("invalid_account_snapshot")
             return False
         self._account_valid = True
         equity = snapshot.equity
@@ -138,7 +139,8 @@ class EngineLifecycle:
         snapshot = self._account_snapshot(self._now())
         if snapshot is None:
             self._account_valid = False
-            self.risk.begin_halt("invalid_account_snapshot")
+            if not self._genuine_halt_latched():
+                self.risk.begin_halt("invalid_account_snapshot")
             return
         self._account_valid = True
         session = self._session_id(self._now())
@@ -177,7 +179,8 @@ class EngineLifecycle:
         positions = self._positions_snapshot(now)
         orders = self._open_orders(now)
         if positions is None or orders is None:
-            self._begin_halt("invalid_broker_snapshot")
+            if not self._genuine_halt_latched():
+                self._begin_halt("invalid_broker_snapshot")
             return False
 
         # A genuine integrity halt (kill switch, daily stop) must survive the whole
@@ -216,7 +219,8 @@ class EngineLifecycle:
         positions = self._positions_snapshot(now)
         orders = self._open_orders(now)
         if positions is None or orders is None:
-            self._begin_halt("invalid_broker_snapshot")
+            if not self._genuine_halt_latched():
+                self._begin_halt("invalid_broker_snapshot")
             return False
         local_orders = {order.id: order for order in self.runner.pending_orders}
         local_client_ids = {order.client_order_id for order in self.runner.pending_orders}
@@ -270,6 +274,15 @@ class EngineLifecycle:
                 return True
         return False
 
+    def _genuine_halt_latched(self) -> bool:
+        """True when the current halt_reason is a fail-closed (HALT-class) reason.
+
+        State-independent (unlike _true_safety_halt_latched), so a genuine safety
+        halt is never downgraded by a recoverable begin_halt at any lifecycle site.
+        """
+        reason = self.risk.halt_reason
+        return reason is not None and classify_halt(reason) is HaltClass.HALT
+
     def _true_safety_halt_latched(self) -> bool:
         """True when a fail-closed (HALT-class) integrity halt is currently latched.
 
@@ -291,12 +304,10 @@ class EngineLifecycle:
         """
         if self._requires_rearm:
             return False
-        if self.risk.state is RiskState.RECOVERING:
-            return True
-        if self.risk.state is not RiskState.HALTING:
-            return False
-        reason = self.risk.halt_reason
-        return reason is None or classify_halt(reason) is HaltClass.RECOVERABLE
+        if self.risk.state in (RiskState.HALTING, RiskState.RECOVERING):
+            reason = self.risk.halt_reason
+            return reason is None or classify_halt(reason) is HaltClass.RECOVERABLE
+        return False
 
     def _recover_from_broker(self, broker_positions, broker_orders, now) -> bool:
         """Reconcile from broker truth. Never sells.
