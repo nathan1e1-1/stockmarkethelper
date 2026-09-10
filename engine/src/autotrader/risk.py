@@ -452,6 +452,12 @@ class RiskManager:
             self.state = RiskState.HALTING
 
     @_synchronized
+    def record_warning(self, reason: str, detail: str = "") -> None:
+        """Non-fatal per-ticker degradation; never changes risk state and never
+        clears a real halt_reason."""
+        return None
+
+    @_synchronized
     def complete_halt(self, *, clean_reconciliation: bool) -> bool:
         if self.state is RiskState.HALTED:
             return clean_reconciliation is True and self._tracking_is_empty()

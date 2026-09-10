@@ -3,6 +3,7 @@ import math
 from datetime import datetime, timezone
 
 from autotrader.exits import DynamicExitEvaluator, ExitManager
+from autotrader.halt import HaltClass, classify_halt
 from autotrader.market import EASTERN
 from autotrader.models import ClosedTrade, Decision, Equity, Order, Side, SignalSet
 from autotrader.scoring import composite_score
@@ -92,6 +93,10 @@ class Runner:
                 self._submit_reserved_entry(ticker)
             except Exception as error:
                 print(f"[error] {ticker}: {error}")
+                if classify_halt("entry_exception") is HaltClass.PER_TICKER_SKIP:
+                    if self.risk is not None:
+                        self.risk.record_warning("entry_exception", f"{ticker}: {error}")
+                    continue
                 self._fail_closed("entry_exception")
 
     def _submit_reserved_entry(self, ticker: str) -> None:

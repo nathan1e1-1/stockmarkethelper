@@ -934,3 +934,21 @@ def test_stale_entry_quote_skips_ticker_without_halting_session():
     assert executor.limit_buys == []
     assert risk.state is RiskState.ACTIVE
     assert risk.halt_reason is None
+
+
+def test_entry_exception_skips_ticker_without_halting():
+    """A scan/entry exception on one ticker must skip it and keep the session ACTIVE."""
+    runner, risk, executor, _ = paper_runner()
+
+    class BoomProvider(FreshProvider):
+        def scan_bars(self, ticker):
+            if ticker == "AAPL":
+                raise RuntimeError("no data")
+            return super().scan_bars(ticker)
+
+    runner.provider = BoomProvider()
+    runner.run_once(["AAPL", "MSFT"])
+
+    assert risk.state is RiskState.ACTIVE
+    assert risk.halt_reason is None
+    assert executor.limit_buys == [("MSFT", 2, 100.0, "entry-2026-09-01-MSFT")]
