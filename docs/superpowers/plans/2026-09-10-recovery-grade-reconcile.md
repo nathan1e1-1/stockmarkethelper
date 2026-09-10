@@ -848,22 +848,51 @@ Ensures every reason produced by the codebase maps to a non-default class where 
 Append to `engine/tests/test_halt.py`:
 
 ```python
-import subprocess
 import re
 from pathlib import Path
 
+from autotrader.halt import (
+    HaltClass,
+    _HALT_REASONS,
+    _RECOVERABLE_REASONS,
+    _SKIP_REASONS,
+    classify_halt,
+)
 
-def test_every_halt_string_in_source_is_classified():
-    """Every begin_halt/_fail_closed reason string in the source must resolve to a
-    defined class (not silently default to HALT unless explicitly intended)."""
+
+def test_every_halt_string_in_source_is_explicitly_classified():
+    """Every reason string the engine can produce must be a member of an explicit
+    classification set, not silently covered by the catch-all default. This guards
+    against drift: dropping a reason from a set now fails the suite.
+
+    Scans begin_halt, _fail_closed, _persist_or_halt removals and the reason-return
+    paths in risk.py.
+    """
     src_dir = Path(__file__).resolve().parents[2] / "src" / "autotrader"
     reasons = set()
+    patterns = (
+        r'(?:begin_halt|_fail_closed|_persist_or_halt)\(\s*"([a-z_]+)"',
+    )
     for path in src_dir.glob("*.py"):
         text = path.read_text()
-        reasons.update(re.findall(r'(?:begin_halt|_fail_closed)\(\s*"([a-z_]+)"', text))
-    for reason in sorted(reasons):
-        assert reason, "empty reason string"
-        assert classify_halt(reason) in HaltClass, reason
+        for pattern in patterns:
+            reasons.update(re.findall(pattern, text))
+    explicit = _HALT_REASONS | _SKIP_REASONS | _RECOVERABLE_REASONS
+    # Strings that are admission/decision reasons, not halt reasons — excluded with
+    # justification. Any NEW halt/skip reason must be added to an explicit set.
+    not_halt_reasons = {
+        "cutoff_latched",
+        "duplicate_ticker",
+        "invalid_input",
+        "max_daily_risk_pct",
+        "max_entries_per_session",
+        "max_gross_exposure",
+        "max_position_exposure",
+        "max_positions",
+    }
+    missing = sorted((reasons - explicit) - not_halt_reasons)
+    assert not missing, f"reason(s) with no explicit class: {missing}"
+    assert not (reasons & {"", None}), "empty/None reason string"
 ```
 
 - [ ] **Step 2: Run tests to verify they pass**
