@@ -6,7 +6,7 @@ import pytest
 
 from autotrader.lifecycle import EngineLifecycle
 from autotrader.main import _parse_args
-from autotrader.models import AccountSnapshot, Equity, Order, Position, PositionsSnapshot, RiskState, Side
+from autotrader.models import AccountSnapshot, Equity, Order, Position, PositionsSnapshot, Quote, RiskState, Side
 from autotrader.risk import RiskManager
 from autotrader.runner import Runner
 from autotrader.state import State, StateStore
@@ -81,7 +81,9 @@ class Executor:
 
 
 class Provider:
-    pass
+    def latest_quote(self, ticker, *, now=None):
+        timestamp = now or NOW
+        return Quote(ticker=ticker, price=100.0, source_timestamp=timestamp, observed_at=timestamp)
 
 
 def lifecycle(*, store=None, executor=None):
@@ -143,7 +145,25 @@ def test_cutoff_latches_before_cleanup_and_never_runs_an_entry_scan():
 
     assert risk.cutoff_latched is True
     assert risk.state is RiskState.HALTING
-    assert executor.exit_requests == []
+    assert risk.halt_reason == "session_cutoff"
+    # Flatten-at-close is the one exit pass still allowed after the cutoff halt: the
+    # cutoff stops entries, it must not also suppress the end-of-day flatten.
+    assert [request[0] for request in executor.exit_requests] == ["AAPL"]
+
+
+def test_tick_flattens_positions_at_flatten_time_and_skips_entry_scan():
+    """At/after the configured flatten time the engine must actually flatten held
+    positions (submit exits), not merely latch the cutoff and drop the exit pass."""
+    engine, risk, runner, executor, _ = lifecycle(executor=Executor(positions=[Position("AAPL", 4, 100.0)]))
+    assert engine.startup_reconcile() is True
+    runner.run_once = lambda universe: pytest.fail("flatten cutoff must prevent entry scans")
+
+    engine.tick(datetime(2026, 9, 2, 19, 55, tzinfo=timezone.utc), ["MSFT"])
+
+    assert risk.cutoff_latched is True
+    assert risk.state is RiskState.HALTING
+    assert [request[0] for request in executor.exit_requests] == ["AAPL"]
+    assert runner.flattened is True
 
 
 def test_rearm_requires_next_session_and_clean_broker_reconciliation():
@@ -633,6 +653,30 @@ def test_recovering_state_with_safety_reason_is_not_recovered():
 
     assert risk.state is not RiskState.ACTIVE
     assert risk.halt_reason == "hard_stop"
+
+
+def test_recovering_safety_halt_survives_broker_divergence():
+    """Recovery must never clear a HALT-class halt_reason for ANY non-ACTIVE state.
+
+    A persisted RECOVERING + hard_stop whose reconcile also sees a broker orphan must
+    not let broker_reconciliation_required overwrite the safety reason and then be
+    auto-recovered to ACTIVE."""
+    position = Position("AAPL", 4, 100.0, opened_at=NOW)
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        risk_state=RiskState.RECOVERING,
+        session_id="2026-09-02",
+        halt_reason="hard_stop",
+        positions=[position],
+    )
+    executor = Executor(positions=[position, Position("MSFT", 3, 50.0, opened_at=NOW)], orders=[])
+    engine, risk, runner, executor, _ = lifecycle(store=Store(loaded), executor=executor)
+
+    engine.startup_reconcile()
+
+    assert risk.state is not RiskState.ACTIVE
+    assert risk.halt_reason == "hard_stop"
+    assert executor.exit_requests == []
 
 
 def test_startup_with_held_broker_position_recovers_active():

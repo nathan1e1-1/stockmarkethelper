@@ -118,6 +118,10 @@ class EngineLifecycle:
         if self._at_cutoff(now):
             self.risk.latch_cutoff()
             self._begin_halt("session_cutoff")
+            # The cutoff stops entries for the day; it must not also suppress the
+            # end-of-day flatten. Run the one exit pass with the configured flatten time.
+            self.runner.manage_exits(flatten_time=self._configured_flatten_time(), now=now)
+            return False
         if not self._reconcile_and_cleanup():
             return False
         if not self.can_scan:
@@ -235,7 +239,9 @@ class EngineLifecycle:
         # A genuine integrity halt (kill switch, daily stop) must survive the whole
         # reconcile. RiskManager.begin_halt overwrites halt_reason unconditionally, so
         # capture it before a broker divergence can latch a recoverable reason over it.
-        safety_halt_latched = self._true_safety_halt_latched()
+        # State-independent: recovery must never clear a HALT-class halt_reason for any
+        # non-ACTIVE state (including RECOVERING).
+        safety_halt_latched = self._genuine_halt_latched()
 
         local_orders = {order.id: order for order in self.runner.pending_orders}
         local_client_ids = {order.client_order_id for order in self.runner.pending_orders}
@@ -326,23 +332,11 @@ class EngineLifecycle:
     def _genuine_halt_latched(self) -> bool:
         """True when the current halt_reason is a fail-closed (HALT-class) reason.
 
-        State-independent (unlike _true_safety_halt_latched), so a genuine safety
-        halt is never downgraded by a recoverable begin_halt at any lifecycle site.
+        State-independent, so a genuine safety halt is never downgraded by a
+        recoverable begin_halt at any lifecycle site, for any non-ACTIVE state.
         """
         reason = self.risk.halt_reason
         return reason is not None and classify_halt(reason) is HaltClass.HALT
-
-    def _true_safety_halt_latched(self) -> bool:
-        """True when a fail-closed (HALT-class) integrity halt is currently latched.
-
-        RiskManager.begin_halt overwrites halt_reason unconditionally, so reconcile
-        must remember this before latching a recoverable divergence over it.
-        """
-        return (
-            self.risk.state is RiskState.HALTING
-            and self.risk.halt_reason is not None
-            and classify_halt(self.risk.halt_reason) is HaltClass.HALT
-        )
 
     def _recovery_permitted(self) -> bool:
         """Only broker-truth divergence is recoverable, never a true-safety halt.
@@ -425,12 +419,18 @@ class EngineLifecycle:
     def _at_cutoff(self, now: datetime) -> bool:
         if not getattr(self.cfg, "flatten_at_close", False):
             return False
-        try:
-            cutoff = time.fromisoformat(self.cfg.flatten_time)
-            return now.astimezone(EASTERN).time() >= cutoff
-        except (AttributeError, TypeError, ValueError):
+        cutoff = self._configured_flatten_time()
+        if cutoff is None:
             self._begin_halt("invalid_flatten_time")
             return True
+        return now.astimezone(EASTERN).time() >= cutoff
+
+    def _configured_flatten_time(self) -> time | None:
+        """Parse the configured flatten time into a `time`, or None when unusable."""
+        try:
+            return time.fromisoformat(self.cfg.flatten_time)
+        except (AttributeError, TypeError, ValueError):
+            return None
 
     def _session_id(self, now: datetime) -> str:
         return now.date().isoformat()
