@@ -22,6 +22,7 @@ class RiskState(str, Enum):
     ACTIVE = "active"
     HALTING = "halting"
     HALTED = "halted"
+    RECOVERING = "recovering"
 
 
 @dataclass

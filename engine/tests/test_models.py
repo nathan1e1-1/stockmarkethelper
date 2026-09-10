@@ -6,6 +6,7 @@ from autotrader.models import (
     ClosedTrade,
     Decision,
     Order,
+    RiskState,
     Side,
     Signal,
     SignalSet,
@@ -87,3 +88,8 @@ def test_order_safety_fields_have_legacy_safe_defaults():
     assert order.processed_filled_qty == 0.0
     assert order.processed_filled_notional == 0.0
     assert order.observed_at is None
+
+
+def test_risk_state_includes_recovering():
+    assert isinstance(RiskState.RECOVERING, RiskState)
+    assert RiskState.RECOVERING.value == "recovering"

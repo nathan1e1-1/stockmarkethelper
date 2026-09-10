@@ -610,3 +610,10 @@ def test_state_rejects_negative_daily_realized_loss(tmp_path):
     }))
     loaded = store.load()
     assert loaded.risk_state is RiskState.HALTED
+
+
+def test_state_roundtrips_recovering_risk_state(tmp_path):
+    store = StateStore(tmp_path)
+    store.save(State(risk_state=RiskState.RECOVERING))
+    loaded = store.load()
+    assert loaded.risk_state is RiskState.RECOVERING
