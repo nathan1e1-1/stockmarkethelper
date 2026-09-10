@@ -94,17 +94,20 @@ def lifecycle(*, store=None, executor=None):
     return EngineLifecycle(cfg, executor, risk, runner, store, clock=lambda: NOW), risk, runner, executor, store
 
 
-def test_startup_reconciliation_orphan_position_halts_until_broker_reports_flat():
+def test_startup_reconciliation_adopts_orphan_position_without_selling():
     engine, risk, _, executor, _ = lifecycle(executor=Executor(positions=[Position("AAPL", 4, 100.0)]))
 
-    assert engine.startup_reconcile() is False
+    assert engine.startup_reconcile() is True
 
-    assert risk.state is RiskState.HALTING
-    assert executor.exit_requests == [("AAPL", 4, "exit-2026-09-02-AAPL-orphan")]
-    assert engine.can_scan is False
+    assert risk.state is RiskState.ACTIVE
+    assert executor.exit_requests == []
+    assert [(position.ticker, position.qty) for position in risk.positions] == [("AAPL", 4)]
+    assert engine.can_scan is True
 
 
-def test_orphan_nonterminal_sell_is_tracked_without_submitting_a_second_exit():
+def test_orphan_nonterminal_sell_never_triggers_a_duplicate_exit():
+    """A broker-originated sell is never adopted as a local intent and never causes
+    the engine to submit its own exit. The broker position is adopted instead."""
     orphan_sell = Order(
         "orphan-sell", "AAPL", Side.SELL, 4, status="accepted", client_order_id="broker-sell-aapl",
         timestamp=NOW, observed_at=NOW, filled_qty=0.0, filled_notional=0.0,
@@ -117,7 +120,7 @@ def test_orphan_nonterminal_sell_is_tracked_without_submitting_a_second_exit():
 
     assert risk.state is RiskState.HALTING
     assert executor.exit_requests == []
-    assert [order.id for order in runner.pending_orders] == ["orphan-sell"]
+    assert [order.id for order in runner.pending_orders] == []
     assert engine.can_scan is False
     executor.positions_value = []
     executor.orders_value = [Order(
@@ -126,15 +129,9 @@ def test_orphan_nonterminal_sell_is_tracked_without_submitting_a_second_exit():
     )]
 
     assert engine.startup_reconcile() is True
-    assert risk.state is RiskState.HALTED
-    executor.positions_value = []
-    executor.orders_value = [Order("exit-broker", "AAPL", Side.SELL, 4, status="filled",
-                                   client_order_id="exit-2026-09-02-AAPL-orphan", timestamp=NOW, observed_at=NOW,
-                                   filled_qty=4.0, filled_notional=400.0, filled_avg_price=100.0)]
-
-    assert engine.startup_reconcile() is True
-    assert risk.state is RiskState.HALTED
-    assert engine.can_scan is False
+    assert risk.state is RiskState.ACTIVE
+    assert risk.positions == []
+    assert executor.exit_requests == []
 
 
 def test_cutoff_latches_before_cleanup_and_never_runs_an_entry_scan():
@@ -145,7 +142,8 @@ def test_cutoff_latches_before_cleanup_and_never_runs_an_entry_scan():
     engine.tick(datetime(2026, 9, 2, 19, 56, tzinfo=timezone.utc), ["MSFT"])
 
     assert risk.cutoff_latched is True
-    assert executor.exit_requests == [("AAPL", 4, "exit-2026-09-02-AAPL-orphan")]
+    assert risk.state is RiskState.HALTING
+    assert executor.exit_requests == []
 
 
 def test_rearm_requires_next_session_and_clean_broker_reconciliation():
@@ -204,16 +202,19 @@ def test_lifecycle_refuses_to_start_without_paper_mode_or_state_store():
         EngineLifecycle(cfg, runner.executor, risk, runner, None, clock=lambda: NOW)
 
 
-def test_persisted_pending_order_missing_from_broker_keeps_engine_halting():
+def test_persisted_pending_order_missing_from_broker_recovers_from_broker_truth():
+    """A ghost local intent with no broker record is recoverable: broker truth says
+    the order does not exist, so recovery releases it instead of wedging the session."""
     pending = Order("buy-1", "AAPL", Side.BUY, 2, status="accepted", client_order_id="entry-2026-09-02-AAPL",
                     timestamp=NOW, observed_at=NOW, filled_qty=0.0, filled_notional=0.0)
     loaded = State(risk_state=RiskState.ACTIVE, session_id="2026-09-02", pending_orders=[pending])
-    engine, risk, _, _, _ = lifecycle(store=Store(loaded))
+    engine, risk, runner, _, _ = lifecycle(store=Store(loaded))
 
-    assert engine.startup_reconcile() is False
+    assert engine.startup_reconcile() is True
 
-    assert risk.state is RiskState.HALTING
-    assert engine.can_scan is False
+    assert risk.state is RiskState.ACTIVE
+    assert runner.pending_orders == []
+    assert engine.can_scan is True
 
 
 def test_main_exposes_local_only_rearm_flag():
@@ -248,19 +249,23 @@ def test_same_session_restart_preserves_persisted_day_start_baseline():
     assert runner.equity.equity == 60_000.0
 
 
-def test_persisted_position_missing_from_broker_stays_halting_and_cannot_scan():
+def test_persisted_position_missing_from_broker_is_recovered_flat():
+    """Broker truth (flat) is authoritative: a stale local position is dropped rather
+    than wedging the session or being sold."""
     loaded = State(
         equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
         positions=[Position("AAPL", 2, 100.0)],
         risk_state=RiskState.ACTIVE,
         session_id="2026-09-02",
     )
-    engine, risk, _, _, _ = lifecycle(store=Store(loaded), executor=Executor(positions=[]))
+    engine, risk, _, executor, _ = lifecycle(store=Store(loaded), executor=Executor(positions=[]))
 
-    assert engine.startup_reconcile() is False
+    assert engine.startup_reconcile() is True
 
-    assert risk.state is RiskState.HALTING
-    assert engine.can_scan is False
+    assert risk.state is RiskState.ACTIVE
+    assert risk.positions == []
+    assert executor.exit_requests == []
+    assert engine.can_scan is True
 
 
 def test_persisted_equity_never_bypasses_invalid_fresh_broker_account_snapshot():
@@ -273,7 +278,8 @@ def test_persisted_equity_never_bypasses_invalid_fresh_broker_account_snapshot()
 
     assert engine.startup_reconcile() is False
 
-    assert risk.state is not RiskState.ACTIVE
+    # Recovery may reconcile books from broker truth, but the engine cannot scan
+    # without a valid fresh account snapshot.
     assert engine.can_scan is False
 
 
@@ -325,9 +331,9 @@ def test_local_pending_buy_backed_position_is_not_treated_as_orphan():
     assert [(position.ticker, position.qty) for position in risk.positions] == [("AAPL", 4)]
 
 
-def test_ensure_exits_skips_broker_position_with_local_pending_buy():
-    """Direct guard test for the destructive NVDA bug: during a HALTING cleanup, _ensure_exits
-    must not orphan-flush a broker position that our own in-flight BUY is about to reconcile."""
+def test_recovery_never_sells_position_backed_by_local_pending_buy():
+    """Destructive NVDA regression guard: recovery must adopt a broker position even when
+    our own in-flight BUY is about to reconcile, and must never orphan-flush it."""
     position = Position("NVDA", 121, 224.43, opened_at=NOW)
     local_pending_buy = Order(
         "buy-broker-1", "NVDA", Side.BUY, 121, status="accepted",
@@ -345,11 +351,10 @@ def test_ensure_exits_skips_broker_position_with_local_pending_buy():
     engine, risk, runner, executor, _ = lifecycle(store=Store(loaded), executor=executor)
     engine._restore_state()
 
-    engine._ensure_exits(executor.positions_value)
+    engine._recover_from_broker(executor.positions_value, [], NOW)
 
     assert executor.exit_requests == []
-    assert len(runner.pending_orders) == 1
-    assert runner.pending_orders[0].side is Side.BUY
+    assert [(p.ticker, p.qty) for p in risk.positions] == [("NVDA", 121)]
 
 
 def test_unbound_intent_without_broker_record_is_not_missing_local_order():
@@ -459,3 +464,39 @@ def test_multi_entry_restore_keeps_daily_realized_loss_across_restart():
 
     assert engine.startup_reconcile() is True
     assert risk.daily_realized_loss_pct == 0.04
+
+
+def test_restored_recovering_state_exits_to_active():
+    """Regression for the begin_halt dead-end: begin_halt only promotes ACTIVE->HALTING,
+    so a restored RECOVERING state must still reconcile back to ACTIVE."""
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        risk_state=RiskState.RECOVERING,
+        session_id="2026-09-02",
+    )
+    engine, risk, _, executor, _ = lifecycle(store=Store(loaded))
+
+    assert engine.startup_reconcile() is True
+
+    assert risk.state is RiskState.ACTIVE
+    assert executor.exit_requests == []
+    assert engine.can_scan is True
+
+
+def test_recovery_never_sells_held_broker_position():
+    """Recovery must adopt a broker-confirmed position, never sell it."""
+    position = Position("AAPL", 4, 100.0, opened_at=NOW)
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        risk_state=RiskState.HALTING,
+        session_id="2026-09-02",
+        positions=[position],
+    )
+    executor = Executor(positions=[position], orders=[])
+    engine, risk, runner, executor, _ = lifecycle(store=Store(loaded), executor=executor)
+
+    engine.startup_reconcile()
+
+    assert executor.exit_requests == []
+    assert risk.state is RiskState.ACTIVE
+    assert [(p.ticker, p.qty) for p in risk.positions] == [("AAPL", 4)]

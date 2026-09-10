@@ -11,8 +11,9 @@ import inspect
 import math
 from datetime import datetime, time, timezone
 
+from autotrader.halt import HaltClass, classify_halt
 from autotrader.market import EASTERN
-from autotrader.models import Equity, Position, RiskState, Side
+from autotrader.models import Equity, RiskState, Side
 
 
 _TERMINAL = frozenset({"filled", "cancelled", "canceled", "rejected", "expired"})
@@ -195,10 +196,11 @@ class EngineLifecycle:
 
         if orphan_orders or missing_local_orders or orphan_positions or missing_broker_positions:
             self._begin_halt("broker_reconciliation_required")
-        if self.risk.state is RiskState.HALTING:
-            blocked_sells = self._adopt_orphan_sells(orphan_orders, positions)
-            self._cancel_open_entries(orders)
-            self._ensure_exits(positions, blocked_sells)
+        if self._recovery_permitted():
+            # Regenerate local books from broker truth (adopt real positions, release
+            # ghosts, bind confirmed orders). Never submits a sell. If broker truth
+            # cannot be read, risk stays HALTING/RECOVERING and the next tick retries.
+            self._recover_from_broker(positions, orders, now)
 
         if not self.runner.reconcile_orders():
             self._broker_clean = False
@@ -261,72 +263,39 @@ class EngineLifecycle:
                 return True
         return False
 
-    def _cancel_open_entries(self, orders) -> None:
-        for order in orders:
-            if order.side is Side.BUY:
-                try:
-                    self._call(self.executor.cancel, order.id)
-                except Exception:
-                    # Reconciliation is intentionally incomplete after a failed cancel.
-                    pass
+    def _recovery_permitted(self) -> bool:
+        """Only broker-truth divergence is recoverable, never a true-safety halt.
 
-    def _adopt_orphan_sells(self, orphan_orders, broker_positions: list[Position]) -> set[str]:
-        """Track a valid broker-originated sell before attempting any cleanup exit.
-
-        An orphan sell is already reducing the broker position.  It must block
-        a duplicate local exit even when its fields are too unsafe to adopt;
-        a valid snapshot is persisted as a normal pending sell so fill deltas
-        can be reconciled through the runner.
+        A restored HALTING/RECOVERING state is reconciled from the broker unless it
+        is a fail-closed halt (kill switch, daily stop, cutoff) or the next session
+        still requires an explicit local rearm.
         """
-        blocked_tickers: set[str] = set()
-        positions_by_ticker = {position.ticker: position for position in broker_positions}
-        pending_ids = {order.id for order in self.runner.pending_orders}
-        pending_sell_tickers = {order.ticker for order in self.runner.pending_orders if order.side is Side.SELL}
-        for order in orphan_orders:
-            if order.side is not Side.SELL or order.ticker not in positions_by_ticker:
-                continue
-            blocked_tickers.add(order.ticker)
-            position = positions_by_ticker[order.ticker]
-            if order.ticker in pending_sell_tickers or order.id in pending_ids:
-                continue
-            if not self._safe_orphan_sell(order, position):
-                continue
-            self.runner.pending_orders.append(order)
-            pending_ids.add(order.id)
-            pending_sell_tickers.add(order.ticker)
-            if not self.runner._persist():
-                self._begin_halt("orphan_sell_persistence_failure")
-        return blocked_tickers
+        if self._requires_rearm:
+            return False
+        if self.risk.state is RiskState.RECOVERING:
+            return True
+        if self.risk.state is not RiskState.HALTING:
+            return False
+        reason = self.risk.halt_reason
+        return reason is None or classify_halt(reason) is HaltClass.RECOVERABLE
 
-    def _ensure_exits(self, broker_positions: list[Position], blocked_sells: set[str] | None = None) -> None:
-        pending_sell_tickers = {order.ticker for order in self.runner.pending_orders if order.side is Side.SELL}
-        pending_sell_tickers.update(blocked_sells or set())
-        known = {position.ticker: position for position in self.risk.positions}
-        # A broker position backed by our own in-flight acknowledged BUY is a fill awaiting
-        # reconciliation, not an orphan. Flushing it force-sells a position we just bought.
-        pending_buy_tickers = {order.ticker for order in self.runner.pending_orders if order.side is Side.BUY}
-        for position in broker_positions:
-            if position.ticker in pending_buy_tickers:
-                continue
-            if position.ticker not in known or not self._same_position(known[position.ticker], position):
-                self.risk.positions = [item for item in self.risk.positions if item.ticker != position.ticker] + [position]
-            if position.ticker not in pending_sell_tickers:
-                self.runner._close(position, 1.0, "orphan")
+    def _recover_from_broker(self, broker_positions, broker_orders, now) -> bool:
+        """Reconcile from broker truth. Never sells.
 
-    @staticmethod
-    def _safe_orphan_sell(order, position: Position) -> bool:
-        return (
-            isinstance(getattr(order, "id", None), str)
-            and bool(order.id)
-            and isinstance(getattr(order, "client_order_id", None), str)
-            and bool(order.client_order_id)
-            and order.side is Side.SELL
-            and order.ticker == position.ticker
-            and EngineLifecycle._positive(getattr(order, "qty", None))
-            and order.qty <= position.qty
-            and isinstance(getattr(order, "status", None), str)
-            and EngineLifecycle._aware(getattr(order, "observed_at", None))
+        Adopts broker positions, releases ghost intents, and binds confirmed orders.
+        """
+        confirmed_client_ids = [getattr(order, "client_order_id", None) for order in broker_orders]
+        confirmed_client_ids = [cid for cid in confirmed_client_ids if isinstance(cid, str)]
+        ok = self.risk.recover(
+            positions=list(broker_positions),
+            confirmed_client_ids=confirmed_client_ids,
+            session_id=self._session_id(now),
         )
+        if not ok:
+            return False
+        self.runner.pending_orders = [o for o in self.runner.pending_orders if o.client_order_id in confirmed_client_ids]
+        self._broker_clean = True
+        return self._persist_or_halt("recover_persistence_failure")
 
     def _begin_halt(self, reason: str) -> None:
         self.risk.begin_halt(reason)
