@@ -429,6 +429,107 @@ def test_bound_intent_without_broker_record_still_counts_as_missing():
     assert engine._missing_local_orders() is True
 
 
+def test_recovery_books_terminal_sell_fill_and_realized_loss():
+    """Recovery must record a broker-confirmed terminal (filled) sell, so realized P&L
+    and the daily-loss gate are not lost. A local pending SELL already filled at the
+    broker is absent from open_orders(), so it used to be pruned unbooked."""
+    position = Position("AAPL", 4, 100.0, opened_at=NOW)
+    pending_sell = Order(
+        "sell-broker-1", "AAPL", Side.SELL, 4, status="submitted",
+        client_order_id="exit-2026-09-02-AAPL-take_profit",
+        timestamp=NOW, observed_at=NOW, filled_qty=0.0, filled_notional=0.0,
+    )
+    broker_filled_sell = Order(
+        "sell-broker-1", "AAPL", Side.SELL, 4, status="filled",
+        client_order_id="exit-2026-09-02-AAPL-take_profit",
+        timestamp=NOW, observed_at=NOW, filled_qty=4.0, filled_notional=380.0,
+        filled_avg_price=95.0,
+    )
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        positions=[position],
+        risk_state=RiskState.HALTING,
+        halt_reason="broker_reconciliation_required",
+        session_id="2026-09-02",
+        pending_orders=[pending_sell],
+    )
+    # Broker truth: flat position, no open orders; the sell itself is FILLED.
+    executor = Executor(positions=[], orders=[broker_filled_sell])
+    engine, risk, runner, executor, _ = lifecycle(store=Store(loaded), executor=executor)
+
+    assert engine.startup_reconcile() is True
+
+    assert risk.positions == []
+    assert executor.exit_requests == []
+    assert len(runner.closed_trades) == 1
+    trade = runner.closed_trades[0]
+    assert trade.ticker == "AAPL"
+    assert trade.qty == 4
+    assert trade.realized_pnl == pytest.approx((95.0 - 100.0) * 4)
+    assert risk.daily_realized_loss_pct == pytest.approx(20.0 / 100_000.0)
+
+
+def test_recovery_keeps_still_open_order_bound():
+    """A local intent the broker still reports as open survives recovery: its client id
+    stays confirmed, so it remains in pending_orders instead of being dropped."""
+    position = Position("AAPL", 4, 100.0, opened_at=NOW)
+    pending_sell = Order(
+        "sell-broker-1", "AAPL", Side.SELL, 4, status="submitted",
+        client_order_id="exit-2026-09-02-AAPL-stop_loss",
+        timestamp=NOW, observed_at=NOW, filled_qty=0.0, filled_notional=0.0,
+    )
+    broker_open_sell = Order(
+        "sell-broker-1", "AAPL", Side.SELL, 4, status="new",
+        client_order_id="exit-2026-09-02-AAPL-stop_loss",
+        timestamp=NOW, observed_at=NOW, filled_qty=0.0, filled_notional=0.0,
+    )
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        positions=[position],
+        risk_state=RiskState.HALTING,
+        halt_reason="broker_reconciliation_required",
+        session_id="2026-09-02",
+        pending_orders=[pending_sell],
+    )
+    executor = Executor(positions=[position], orders=[broker_open_sell])
+    engine, risk, runner, executor, _ = lifecycle(store=Store(loaded), executor=executor)
+
+    assert engine.startup_reconcile() is True
+
+    assert [order.client_order_id for order in runner.pending_orders] == ["exit-2026-09-02-AAPL-stop_loss"]
+    assert [(p.ticker, p.qty) for p in risk.positions] == [("AAPL", 4)]
+    assert runner.closed_trades == []
+    assert executor.exit_requests == []
+
+
+def test_recovery_drops_true_ghost_without_broker_record():
+    """A local intent with no broker record at all (neither open nor terminal) is a true
+    ghost and must be released by recovery, not kept as a wedge."""
+    pending_sell = Order(
+        "sell-broker-1", "AAPL", Side.SELL, 4, status="submitted",
+        client_order_id="exit-2026-09-02-AAPL-stop_loss",
+        timestamp=NOW, observed_at=NOW, filled_qty=0.0, filled_notional=0.0,
+    )
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        positions=[Position("AAPL", 4, 100.0, opened_at=NOW)],
+        risk_state=RiskState.HALTING,
+        halt_reason="broker_reconciliation_required",
+        session_id="2026-09-02",
+        pending_orders=[pending_sell],
+    )
+    # Broker is flat with no record of the sell at all.
+    executor = Executor(positions=[], orders=[])
+    engine, risk, runner, executor, _ = lifecycle(store=Store(loaded), executor=executor)
+
+    assert engine.startup_reconcile() is True
+
+    assert risk.state is RiskState.ACTIVE
+    assert runner.pending_orders == []
+    assert runner.closed_trades == []
+    assert executor.exit_requests == []
+
+
 class MultiEntryConfig(Config):
     max_position_pct = 0.05
     max_gross_exposure_pct = 0.05

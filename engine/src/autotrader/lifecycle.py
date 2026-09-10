@@ -355,10 +355,30 @@ class EngineLifecycle:
     def _recover_from_broker(self, broker_positions, broker_orders, now) -> bool:
         """Reconcile from broker truth. Never sells.
 
-        Adopts broker positions, releases ghost intents, and binds confirmed orders.
+        A local pending order can be terminal at the broker (filled/cancelled/rejected)
+        between ticks, so it is absent from the open-order snapshot. This routine first
+        BOOKS every broker-confirmed terminal fill through the runner's monotonic
+        reconcile machinery, and only then lets risk.recover adopt broker positions,
+        release true ghosts, and bind still-open orders. Booking before pruning is what
+        preserves realized P&L and the daily-loss gate. No order is ever submitted here.
         """
         confirmed_client_ids = [getattr(order, "client_order_id", None) for order in broker_orders]
         confirmed_client_ids = [cid for cid in confirmed_client_ids if isinstance(cid, str)]
+        confirmed = set(confirmed_client_ids)
+
+        # A local intent is a true ghost only when the broker has no record of it at all
+        # (neither open nor terminal). Drop only those, so that a terminal-but-unfilled
+        # order still survives to be booked below and an open order stays bound.
+        self.runner.pending_orders = [
+            pending for pending in self.runner.pending_orders if self._broker_order_record(pending) is not None
+        ]
+
+        # Book broker-confirmed terminal fills and bind live orders BEFORE risk.recover
+        # overwrites the local books with broker truth. This path only reports what the
+        # broker already confirmed; it never submits an order.
+        if not self.runner.reconcile_orders():
+            return False
+
         ok = self.risk.recover(
             positions=list(broker_positions),
             confirmed_client_ids=confirmed_client_ids,
@@ -366,9 +386,23 @@ class EngineLifecycle:
         )
         if not ok:
             return False
-        self.runner.pending_orders = [o for o in self.runner.pending_orders if o.client_order_id in confirmed_client_ids]
+        self.runner.pending_orders = [o for o in self.runner.pending_orders if o.client_order_id in confirmed]
         self._broker_clean = True
         return self._persist_or_halt("recover_persistence_failure")
+
+    def _broker_order_record(self, pending):
+        """The broker's record for a local intent, or None when the broker has none.
+
+        Looks up by client order ID while the intent is unbound and by broker order ID
+        once acknowledged. Unlike open_orders(), a terminal record is returned as well,
+        so a broker-confirmed fill is never mistaken for a ghost.
+        """
+        try:
+            if pending.id == pending.client_order_id:
+                return self._call(self.executor.order_by_client_id, pending.client_order_id)
+            return self._call(self.executor.order, pending.id)
+        except Exception:
+            return None
 
     def _begin_halt(self, reason: str) -> None:
         self.risk.begin_halt(reason)
