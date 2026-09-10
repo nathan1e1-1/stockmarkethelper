@@ -333,18 +333,22 @@ def test_repeated_partial_sell_snapshot_books_one_actual_fill_slice():
     assert [(position.ticker, position.qty) for position in risk.positions] == [("AAPL", 8)]
 
 
-def test_missing_or_decreasing_broker_fills_halt_reconciliation_without_booking():
+def test_open_order_missing_fills_is_in_flight_and_stays_active():
+    """An OPEN (accepted) order with no fills yet (filled_qty=None) is a legitimate
+    in-flight state — it must NOT halt reconciliation. This is the fix for the
+    production bug where an unfilled entry (e.g. NOK) blocked booking sibling fills."""
     runner, risk, executor, _ = paper_runner()
     runner.run_once(["AAPL"])
     executor.orders["buy-1"] = Order(
         id="buy-1", ticker="AAPL", side=Side.BUY, qty=2, status="accepted",
         client_order_id="entry-2026-09-01-AAPL", observed_at=NOW,
+        filled_qty=None, filled_notional=None,
     )
 
-    runner.reconcile_orders()
-
-    assert risk.state is RiskState.HALTING
-    assert risk.positions == []
+    assert runner.reconcile_orders() is True
+    assert risk.state is RiskState.ACTIVE
+    assert risk.halt_reason is None
+    assert len(runner.pending_orders) == 1  # still-open order kept
 
 
 def test_order_lookup_failure_stops_reconciliation():
@@ -896,6 +900,37 @@ def test_terminal_rejected_buy_with_zero_fills_is_absorbed_not_halting():
     assert runner.pending_orders == []
     assert risk.positions == []
     assert risk.state is RiskState.ACTIVE
+
+
+def test_open_in_flight_buy_with_no_fills_is_valid_not_halting():
+    """An OPEN (non-terminal) order that has not filled yet has filled_qty=None at the
+    broker — that is the normal in-flight state, not an invalid snapshot. It must
+    validate and keep the session ACTIVE so pending fills (e.g. sibling orders that have
+    filled) can still reconcile into positions."""
+    runner, risk, executor, _ = paper_runner()
+    runner.equity = Equity(equity=100_000.0, day_start_equity=100_000.0, peak_equity=100_000.0, day="2026-09-01")
+    # Reserve NOK exactly like the entry path does, then bind the broker acknowledgement
+    # so this is a real bound in-flight intent (not a broken test setup).
+    admission = risk.reserve_entry("NOK", 2, 100.0, 100_000.0, NOW)
+    assert admission.accepted
+    assert risk.bind_acknowledgement(admission.reservation.client_order_id, "broker-nok") is True
+    # Broker reports the open NOK order as 'new' with no fills yet.
+    executor.orders["broker-nok"] = Order(
+        id="broker-nok", ticker="NOK", side=Side.BUY, qty=2, status="new",
+        client_order_id="entry-2026-09-01-NOK", timestamp=NOW, observed_at=NOW,
+        filled_qty=None, filled_notional=None,
+    )
+    runner.pending_orders = [Order(
+        id="broker-nok", ticker="NOK", side=Side.BUY, qty=2, status="new",
+        client_order_id="entry-2026-09-01-NOK", timestamp=NOW, observed_at=NOW,
+        filled_qty=None, filled_notional=None,
+    )]
+
+    assert runner._valid_snapshot(executor.orders["broker-nok"], runner.pending_orders[0]) is True
+    assert runner.reconcile_orders() is True
+    assert risk.state is RiskState.ACTIVE
+    assert risk.halt_reason is None
+    assert len(runner.pending_orders) == 1  # open order kept, session active
 
 
 def test_terminal_cancelled_sell_with_zero_fills_is_absorbed_not_halting():

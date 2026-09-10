@@ -212,12 +212,12 @@ class Runner:
             self._fail_closed("missing_risk_manager")
             return False
         status = self._status(snapshot.status)
+        filled_qty = snapshot.filled_qty if snapshot.filled_qty is not None else 0.0
+        filled_notional = snapshot.filled_notional if snapshot.filled_notional is not None else 0.0
         if status in _TERMINAL_STATUSES:
-            filled_qty = snapshot.filled_qty if snapshot.filled_qty is not None else 0.0
-            filled_notional = snapshot.filled_notional if snapshot.filled_notional is not None else 0.0
             applied = self.risk.apply_terminal_order(snapshot.id, status, filled_qty, filled_notional)
         else:
-            applied = self.risk.apply_order_delta(snapshot.id, snapshot.filled_qty, snapshot.filled_notional)
+            applied = self.risk.apply_order_delta(snapshot.id, filled_qty, filled_notional)
         if not applied:
             self._fail_closed("invalid_buy_fill")
             return False
@@ -478,6 +478,11 @@ class Runner:
         ):
             return False
         if status in _TERMINAL_STATUSES and snapshot.filled_qty is None and snapshot.filled_notional is None:
+            return True
+        if snapshot.filled_qty is None and snapshot.filled_notional is None:
+            # An OPEN (in-flight) order that has not filled yet reports no fills at the
+            # broker. That is the normal state, not an anomaly — accept it so reconcile
+            # can proceed and book any sibling fills.
             return True
         if not (self._nonnegative(snapshot.filled_qty) and self._nonnegative(snapshot.filled_notional)):
             return False
