@@ -1,3 +1,6 @@
+import sys
+
+from autotrader.exits import DynamicExitEvaluator
 from autotrader.runner import Runner
 from copy import deepcopy
 from dataclasses import dataclass
@@ -13,6 +16,22 @@ import pytest
 class BuyAgent:
     def decide(self, ss):
         return AgentDecision(ticker=ss.ticker, decision=Decision.BUY, rationale="t", confidence=0.7, signals=ss)
+
+
+class FakeMomentum:
+    def __init__(self, detail):
+        self.detail = detail
+
+    def compute(self, ticker, bars):
+        return Signal(name="momentum", value=0.5, detail=self.detail)
+
+
+class FakeSentiment:
+    def __init__(self, value):
+        self.value = value
+
+    def compute(self, ticker, news):
+        return Signal(name="sentiment", value=self.value, detail={})
 
 
 class FakeExec:
@@ -358,7 +377,84 @@ def test_timeout_intent_reconciles_by_client_id_without_resubmitting():
     assert runner.reconcile_orders() is True
     assert executor.limit_buys == []
     assert [(position.ticker, position.qty) for position in risk.positions] == [("AAPL", 1)]
-    assert risk.state is RiskState.HALTING
+    assert risk.state is RiskState.ACTIVE
+
+
+def test_submission_timeout_stays_active_so_client_lookup_can_retry():
+    """A transient submit/network failure must NOT permanently halt: the intent stays durable
+    and the engine stays ACTIVE, so the next reconcile's client-ID lookup can bind a broker
+    order that did land, or hold until it appears."""
+    runner, risk, executor, _ = paper_runner()
+
+    def timeout(*_):
+        raise TimeoutError("submission outcome unknown")
+
+    executor.submit_limit_buy = timeout
+    runner.run_once(["AAPL"])
+
+    assert risk.state is RiskState.ACTIVE
+    assert risk.halt_reason is None
+    assert len(runner.pending_orders) == 1
+
+    # Broker never received it; with no record, reconcile keeps holdings ACTIVE (retry later).
+    assert runner.reconcile_orders() is True
+    assert risk.state is RiskState.ACTIVE
+    assert len(runner.pending_orders) == 1
+    assert risk.reservations
+
+
+def test_submission_timeout_broker_acknowledged_next_tick_binds():
+    """If the broker DID accept despite the timeout, the client-ID lookup on the next
+    reconcile must bind the acknowledgement and keep the engine ACTIVE."""
+    runner, risk, executor, _ = paper_runner()
+
+    def timeout(*_):
+        raise TimeoutError("submission outcome unknown")
+
+    executor.submit_limit_buy = timeout
+    runner.run_once(["AAPL"])
+    assert risk.state is RiskState.ACTIVE
+
+    executor.orders["buy-late-ack"] = Order(
+        id="buy-late-ack", ticker="AAPL", side=Side.BUY, qty=2, status="accepted",
+        client_order_id="entry-2026-09-01-AAPL", observed_at=NOW,
+        filled_qty=0.0, filled_notional=0.0,
+    )
+
+    assert runner.reconcile_orders() is True
+    assert risk.state is RiskState.ACTIVE
+    assert [order.id for order in runner.pending_orders] == ["buy-late-ack"]
+    assert risk.session_entry_count == 1
+
+
+def test_stale_client_id_collision_does_not_halt_unbound_intent():
+    """A same-session re-entry attempt that never reached the broker reuses the client
+    order ID. Alpaca's client-ID lookup then returns the OLD (stale) broker order under
+    that ID with a different qty. For an unbound intent (id == client id), a client-ID
+    match that disagrees on qty/side is NOT our order — treat it as uncertain-hold
+    (continue while ACTIVE), never a fatal invalid_order_snapshot."""
+    runner, risk, executor, _ = paper_runner()
+
+    def timeout(*_):
+        raise TimeoutError("submission outcome unknown")
+
+    executor.submit_limit_buy = timeout
+    runner.run_once(["AAPL"])
+    assert risk.state is RiskState.ACTIVE
+    assert len(runner.pending_orders) == 1
+    assert runner.pending_orders[0].id == runner.pending_orders[0].client_order_id
+
+    # Broker client-ID lookup returns the STALE order (different broker id AND qty).
+    executor.orders["stale-broker-order"] = Order(
+        id="stale-broker-order", ticker="AAPL", side=Side.BUY, qty=99, status="cancelled",
+        client_order_id="entry-2026-09-01-AAPL", observed_at=NOW,
+        filled_qty=None, filled_notional=None,
+    )
+
+    assert runner.reconcile_orders() is True
+    assert risk.state is RiskState.ACTIVE
+    assert risk.halt_reason is None
+    assert len(runner.pending_orders) == 1
 
 
 def test_inconsistent_broker_fill_average_halts_without_booking():
@@ -506,7 +602,8 @@ def test_stale_or_future_quote_source_timestamp_blocks_submission(source_timesta
     runner.run_once(["AAPL"])
 
     assert executor.limit_buys == []
-    assert risk.state is RiskState.HALTING
+    assert risk.state is RiskState.ACTIVE
+    assert risk.halt_reason is None
 
 
 def test_runner_passes_its_clock_to_quote_provider_when_supported():
@@ -644,3 +741,214 @@ def test_immediately_filled_sell_acknowledgement_persists_and_reconciles(tmp_pat
     assert runner.reconcile_orders() is True
     assert [(trade.qty, trade.exit_price) for trade in runner.closed_trades] == [(10, 101)]
     assert risk.positions == []
+
+
+@dataclass
+class MultiCfg(PaperCfg):
+    max_position_pct: float = 0.05
+    max_gross_exposure_pct: float = 0.05
+    max_positions: int = 5
+    max_entries_per_session: int = sys.maxsize
+    kill_switch_pct: float = 0.25
+    risk_per_position_pct: float | None = 0.01
+    max_daily_risk_pct: float | None = 0.05
+    stop_loss_pct: float = 0.05
+    take_profit_pct: float = 0.05
+    risk_profile: str = "multi-entry"
+
+
+def make_multi_runner():
+    cfg = MultiCfg()
+    risk = RiskManager(cfg, clock=lambda: NOW, session_id="2026-09-01")
+    store = RecordingStore()
+    executor = FillExec()
+    runner = Runner(
+        provider=FreshProvider(), agent=BuyAgent(), executor=executor, risk=risk, cfg=cfg,
+        state_store=store, clock=lambda: NOW,
+    )
+    runner.equity = Equity(equity=100_000.0, day_start_equity=100_000.0, peak_equity=100_000.0, day="2026-09-01")
+    return runner, risk, executor, store
+
+
+def test_manage_exits_runs_hard_stop_first_and_skips_dynamic_for_stopped():
+    runner, risk, _, _ = make_multi_runner()
+    risk.positions = [Position(ticker="AAPL", qty=10.0, avg_entry_price=100.0, opened_at=NOW)]
+
+    calls = []
+
+    class StopProvider(FreshProvider):
+        def scan_bars(self, ticker):
+            calls.append(ticker)
+            return super().scan_bars(ticker)
+
+        def latest_quote(self, ticker, *, now=None):
+            from autotrader.models import Quote
+            return Quote(ticker=ticker, price=94.0, source_timestamp=now or NOW, observed_at=now or NOW)
+    runner.provider = StopProvider()
+    runner.dynamic_exit = DynamicExitEvaluator(take_profit_pct=0.05, provider=runner.provider)
+
+    runner.manage_exits()
+
+    assert runner.pending_orders[0].client_order_id.startswith("exit-2026-09-01-AAPL-stop_loss")
+    assert calls == []
+
+
+def test_manage_exits_hold_from_dynamic_leaves_position_open():
+    runner, risk, executor, _ = make_multi_runner()
+    risk.positions = [Position(ticker="AAPL", qty=10.0, avg_entry_price=100.0, opened_at=NOW)]
+
+    class DipProvider(FreshProvider):
+        def latest_quote(self, ticker, *, now=None):
+            from autotrader.models import Quote
+            return Quote(ticker=ticker, price=96.0, source_timestamp=now or NOW, observed_at=now or NOW)
+    runner.provider = DipProvider()
+    runner.dynamic_exit = DynamicExitEvaluator(
+        take_profit_pct=0.05, provider=runner.provider,
+        momentum=FakeMomentum({"sma_short": 102.0, "sma_long": 100.0}),
+    )
+
+    runner.manage_exits()
+
+    assert runner.pending_orders == []
+    assert executor.exit_requests == []
+
+
+def test_dynamic_early_exit_closes_position():
+    runner, risk, executor, _ = make_multi_runner()
+    risk.positions = [Position(ticker="AAPL", qty=10.0, avg_entry_price=100.0, opened_at=NOW)]
+
+    class EarlyProvider(FreshProvider):
+        def latest_quote(self, ticker, *, now=None):
+            from autotrader.models import Quote
+            return Quote(ticker=ticker, price=97.0, source_timestamp=now or NOW, observed_at=now or NOW)
+    runner.provider = EarlyProvider()
+    runner.dynamic_exit = DynamicExitEvaluator(
+        take_profit_pct=0.05, provider=runner.provider,
+        momentum=FakeMomentum({"sma_short": 98.0, "sma_long": 100.0}),
+        sentiment=FakeSentiment(-0.5),
+    )
+
+    runner.manage_exits()
+
+    assert runner.pending_orders[0].client_order_id.endswith("-exit_early")
+
+
+def test_stop_loss_fill_increments_daily_realized_loss():
+    runner, risk, executor, _ = make_multi_runner()
+    risk.positions = [Position(ticker="AAPL", qty=10.0, avg_entry_price=100.0, opened_at=NOW)]
+    runner._close(risk.positions[0], price=1.0, reason="stop_loss")
+    executor.orders["sell-1"] = Order(
+        id="sell-1", ticker="AAPL", side=Side.SELL, qty=10, status="filled",
+        client_order_id=runner.pending_orders[0].client_order_id,
+        filled_qty=10, filled_notional=940.0, filled_avg_price=94.0,
+        observed_at=NOW, timestamp=NOW,
+    )
+
+    runner.reconcile_orders()
+
+    assert risk.daily_realized_loss_pct == pytest.approx(60.0 / 100_000.0)  # (100-94)*10 / day_start
+
+
+def test_multi_entry_run_once_ignores_daily_stop_band():
+    runner, risk, executor, _ = make_multi_runner()
+    runner.equity = Equity(equity=94_000.0, day_start_equity=100_000.0, peak_equity=100_000.0, day="2026-09-01")
+    runner.run_once([])
+    assert risk.state is RiskState.ACTIVE
+    assert risk.halt_reason is None
+
+
+def test_initial_run_once_still_halts_in_daily_stop_band():
+    runner, risk, _, _ = paper_runner()
+    runner.equity = Equity(equity=94_000.0, day_start_equity=100_000.0, peak_equity=100_000.0, day="2026-09-01")
+    runner.run_once([])
+    assert risk.state is not RiskState.ACTIVE
+    assert risk.halt_reason == "daily_stop"
+
+
+def test_terminal_cancelled_buy_with_zero_fills_is_absorbed_not_halting():
+    """Root-cause regression: a broker-confirmed cancelled buy (zero fills, filled_qty/notional
+    normalized to None) must be absorbable as a no-op trade, not permanently halt the engine."""
+    runner, risk, executor, _ = paper_runner()
+    runner.run_once(["AAPL"])
+    executor.orders["buy-1"] = Order(
+        id="buy-1", ticker="AAPL", side=Side.BUY, qty=2, status="cancelled",
+        client_order_id="entry-2026-09-01-AAPL", filled_qty=None, filled_notional=None,
+        filled_avg_price=None, observed_at=NOW,
+    )
+
+    assert runner.reconcile_orders() is True
+    assert runner.pending_orders == []
+    assert risk.positions == []
+    assert risk.state is RiskState.ACTIVE
+    assert risk.halt_reason is None
+
+
+def test_terminal_rejected_buy_with_zero_fills_is_absorbed_not_halting():
+    runner, risk, executor, _ = paper_runner()
+    runner.run_once(["AAPL"])
+    executor.orders["buy-1"] = Order(
+        id="buy-1", ticker="AAPL", side=Side.BUY, qty=2, status="rejected",
+        client_order_id="entry-2026-09-01-AAPL", filled_qty=None, filled_notional=None,
+        filled_avg_price=None, observed_at=NOW,
+    )
+
+    assert runner.reconcile_orders() is True
+    assert runner.pending_orders == []
+    assert risk.positions == []
+    assert risk.state is RiskState.ACTIVE
+
+
+def test_terminal_cancelled_sell_with_zero_fills_is_absorbed_not_halting():
+    """A sell that is terminal (cancelled) with zero fills must not block; position stays intact."""
+    runner, risk, executor, _ = paper_runner()
+    risk.positions = [Position(ticker="AAPL", qty=10, avg_entry_price=100, opened_at=NOW)]
+    runner._close(risk.positions[0], price=1.0, reason="stop_loss")
+    executor.orders["sell-1"] = Order(
+        id="sell-1", ticker="AAPL", side=Side.SELL, qty=10, status="cancelled",
+        client_order_id=runner.pending_orders[0].client_order_id,
+        filled_qty=None, filled_notional=None, filled_avg_price=None,
+        observed_at=NOW, timestamp=NOW,
+    )
+
+    assert runner.reconcile_orders() is True
+    assert runner.pending_orders == []
+    assert [(position.ticker, position.qty) for position in risk.positions] == [("AAPL", 10)]
+    assert risk.state is RiskState.ACTIVE
+
+
+def test_stale_entry_quote_skips_ticker_without_halting_session():
+    """A transiently stale entry quote (thin IEX feed) must skip that ticker's entry and
+    keep the session ACTIVE, not fail-closed the whole engine."""
+    runner, risk, executor, _ = paper_runner()
+
+    class StaleEntryProvider(FreshProvider):
+        def latest_quote(self, ticker, *, now=None):
+            from autotrader.models import Quote
+            return Quote(
+                ticker=ticker, price=100.0, source_timestamp=NOW - timedelta(seconds=121), observed_at=NOW,
+            )
+
+    runner.provider = StaleEntryProvider()
+    runner.run_once(["AAPL"])
+
+    assert executor.limit_buys == []
+    assert risk.state is RiskState.ACTIVE
+    assert risk.halt_reason is None
+
+
+def test_entry_exception_skips_ticker_without_halting():
+    """A scan/entry exception on one ticker must skip it and keep the session ACTIVE."""
+    runner, risk, executor, _ = paper_runner()
+
+    class BoomProvider(FreshProvider):
+        def scan_bars(self, ticker):
+            if ticker == "AAPL":
+                raise RuntimeError("no data")
+            return super().scan_bars(ticker)
+
+    runner.provider = BoomProvider()
+    runner.run_once(["AAPL", "MSFT"])
+
+    assert risk.state is RiskState.ACTIVE
+    assert risk.halt_reason is None
+    assert executor.limit_buys == [("MSFT", 2, 100.0, "entry-2026-09-01-MSFT")]

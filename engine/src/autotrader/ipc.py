@@ -29,6 +29,7 @@ class SharedState:
         self.equity: Equity | None = None
         self.positions: list = []
         self.decisions: list = []
+        self.closed_trades: list = []
         self.summary: str = ""
         self.risk = None
         self.equity_history: list = []
@@ -111,6 +112,31 @@ def _selected_chat_topics(raw: str) -> list[str]:
     if "pnl_explanation" in selected:
         selected = [topic for topic in selected if topic not in {"pnl", "decisions"}]
     return selected
+
+
+def _fallback_chat_topics(question: str) -> list[str]:
+    """Deterministic, keyword-based topic selection used when the LLM topic selector is
+    malformed/unavailable. Guarantees the chat renders safe factual topics instead of
+    failing closed with a 503."""
+    lowered = (question or "").casefold()
+    # Normalize the P&L spelling (ampersand and punctuation variants) so "P&L", "PnL",
+    # "p/l", "p l" all match.
+    normalized = lowered.replace("&", "n").replace("/", "n").replace(" ", "")
+    topics: list[str] = ["account", "market_session", "risk"]
+    if any(word in normalized for word in ("pnl", "profit", "loss", "gain", "return", "performance", "down", "up")):
+        topics = [topic for topic in topics if topic != "account"]
+        topics.insert(0, "pnl")
+        topics.append("pnl_explanation")
+    if any(word in lowered for word in ("position", "holding", "hold", "owned", "portfolio")):
+        if "positions" not in topics:
+            topics.append("positions")
+    if any(word in lowered for word in ("decision", "decided", "signal", "bought", "sold", "trade", "trades")):
+        if "decisions" not in topics:
+            topics.append("decisions")
+    if any(word in lowered for word in ("risk", "stop", "halt", "kill", "drawdown", "exposure", "slot")):
+        if "risk" not in topics:
+            topics.append("risk")
+    return topics
 
 
 def _currency_amount(value: int | float) -> str:
@@ -199,13 +225,29 @@ def create_app(state: SharedState, provider=None, llm=None) -> FastAPI:
     @app.get("/api/status")
     def status() -> dict[str, Any]:
         eq = state.equity
+        live_by_ticker = {}
+        if state.pnl_attribution:
+            for record in state.pnl_attribution.get("open_positions", []):
+                live_by_ticker[record.get("ticker")] = record
+        positions = []
+        for position in state.positions:
+            record = asdict(position)
+            live = live_by_ticker.get(position.ticker)
+            record["current_price"] = live.get("current_price") if live else None
+            record["unrealized_pnl"] = live.get("unrealized_pnl") if live else None
+            record["unrealized_pnl_pct"] = live.get("unrealized_pnl_pct") if live else None
+            positions.append(record)
         body = {
             "equity": asdict(eq) if eq else None,
-            "positions": [asdict(p) for p in state.positions],
+            "positions": positions,
             "decisions": [asdict(d) for d in state.decisions],
+            "closed_trades": [asdict(t) for t in state.closed_trades],
             "equity_history": state.equity_history,
             "kill_switch": state.risk.hard_stop_triggered(eq.equity) if (state.risk and eq) else False,
             "daily_stop": state.risk.daily_stop_triggered(eq.equity) if (state.risk and eq) else False,
+            "daily_realized_loss_pct": state.risk.daily_realized_loss_pct if state.risk else None,
+            "daily_risk_gate_tripped": state.risk.daily_risk_gate_tripped() if state.risk else None,
+            "open_slots": state.risk.open_position_slots() if state.risk else None,
         }
         return body
 
@@ -266,6 +308,14 @@ def create_app(state: SharedState, provider=None, llm=None) -> FastAPI:
             if selector.strip() == _UNAVAILABLE_LLM_RESPONSE:
                 raise RuntimeError("llm unavailable")
             topics = _selected_chat_topics(selector)
+        except Exception as error:
+            # The LLM selector is a convenience, not a correctness gate: a malformed or
+            # prose answer must degrade to a deterministic keyword-based topic selection,
+            # never take the whole chat down as 'unavailable'. Only a truly missing LLM
+            # (llm is None) is fatal (handled above).
+            print(f"[warn] chat topic selector degraded to keyword fallback: {error}")
+            topics = _fallback_chat_topics(request.question)
+        try:
             response_parts = _render_chat_topics(state, topics, request.question, provider)
             if not response_parts:
                 return {"answer": _SAFE_READ_ONLY_LIMITATION, "disclaimer": _INFORMATIONAL_DISCLAIMER}
@@ -278,6 +328,8 @@ def create_app(state: SharedState, provider=None, llm=None) -> FastAPI:
                 if structured is not None:
                     response.update(structured)
             return response
+        except HTTPException:
+            raise
         except Exception as error:
             raise HTTPException(
                 status_code=503,

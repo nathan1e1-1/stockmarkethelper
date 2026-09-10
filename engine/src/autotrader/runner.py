@@ -2,7 +2,8 @@ import inspect
 import math
 from datetime import datetime, timezone
 
-from autotrader.exits import ExitManager
+from autotrader.exits import DynamicExitEvaluator, ExitManager
+from autotrader.halt import HaltClass, classify_halt
 from autotrader.market import EASTERN
 from autotrader.models import ClosedTrade, Decision, Equity, Order, Side, SignalSet
 from autotrader.scoring import composite_score
@@ -35,6 +36,14 @@ class Runner:
         self.equity: Equity | None = None
         self.decisions: list = []
         self.exit_manager = ExitManager(cfg.stop_loss_pct, cfg.take_profit_pct) if cfg else None
+        self.dynamic_exit = None
+        if cfg is not None and getattr(cfg, "risk_profile", "initial") == "multi-entry":
+            self.dynamic_exit = DynamicExitEvaluator(
+                take_profit_pct=cfg.take_profit_pct,
+                provider=provider,
+                momentum=self.momentum,
+                sentiment=self.sentiment,
+            )
         self.closed_trades: list = []
         self.pending_orders: list[Order] = []
         self.flattened = False
@@ -56,7 +65,13 @@ class Runner:
                 peak_equity=self.cfg.paper_capital,
                 day="",
             )
-        if self.risk and (self.risk.hard_stop_triggered(self.equity.equity) or self.risk.daily_stop_triggered(self.equity.equity)):
+        if self.risk and self.risk.hard_stop_triggered(self.equity.equity):
+            return
+        if (
+            self.risk
+            and getattr(self.cfg, "risk_profile", "initial") != "multi-entry"
+            and self.risk.daily_stop_triggered(self.equity.equity)
+        ):
             return
         threshold = self.cfg.entry_threshold if self.cfg else 0.5
         for ticker in universe:
@@ -78,12 +93,19 @@ class Runner:
                 self._submit_reserved_entry(ticker)
             except Exception as error:
                 print(f"[error] {ticker}: {error}")
+                if classify_halt("entry_exception") is HaltClass.PER_TICKER_SKIP:
+                    if self.risk is not None:
+                        self.risk.record_warning("entry_exception", f"{ticker}: {error}")
+                    continue
                 self._fail_closed("entry_exception")
 
     def _submit_reserved_entry(self, ticker: str) -> None:
         quote = self._call_with_now(self.provider.latest_quote, ticker)
         if not self._valid_quote(quote, ticker):
-            self._fail_closed("invalid_quote")
+            # A transiently stale/invalid entry quote (thin IEX feed) is a per-ticker data
+            # condition, not a trading-integrity failure. Skip this entry and keep the
+            # session ACTIVE so other signals can still trade.
+            print(f"[scan] {ticker}: invalid quote, skipping entry")
             return
         qty = self.risk.position_size(ticker, quote.price, self.equity.equity)
         admission = self.risk.reserve_entry(ticker, qty, quote.price, self.equity.equity, quote.observed_at)
@@ -113,7 +135,10 @@ class Runner:
             )
         except Exception:
             # The client ID is already durable. It is the only safe retry key.
-            self._fail_closed("entry_submission_unknown")
+            # Do NOT halt: reconciliation re-looks-up by client ID each tick while ACTIVE,
+            # binding a broker order that did land or holding until it appears. Halting here
+            # would make a transient network failure permanently halt the session.
+            self._persist()
             return
         if not self._valid_acknowledgement(acknowledged, intent):
             self._fail_closed("invalid_entry_acknowledgement")
@@ -139,6 +164,13 @@ class Runner:
                     return False
                 continue
             if not self._valid_snapshot(snapshot, pending):
+                if self._uncertain_stale_collision(pending, snapshot):
+                    # For an unbound intent, a client-ID match that disagrees on
+                    # side/qty/ticker is a stale-collision under a reused client ID,
+                    # not our order. Hold as uncertain (retry later) while ACTIVE.
+                    if self.risk is not None and self.risk.state.value != "active":
+                        return False
+                    continue
                 self._fail_closed("invalid_order_snapshot")
                 return False
             if pending.id == pending.client_order_id and snapshot.id != pending.id:
@@ -181,7 +213,9 @@ class Runner:
             return False
         status = self._status(snapshot.status)
         if status in _TERMINAL_STATUSES:
-            applied = self.risk.apply_terminal_order(snapshot.id, status, snapshot.filled_qty, snapshot.filled_notional)
+            filled_qty = snapshot.filled_qty if snapshot.filled_qty is not None else 0.0
+            filled_notional = snapshot.filled_notional if snapshot.filled_notional is not None else 0.0
+            applied = self.risk.apply_terminal_order(snapshot.id, status, filled_qty, filled_notional)
         else:
             applied = self.risk.apply_order_delta(snapshot.id, snapshot.filled_qty, snapshot.filled_notional)
         if not applied:
@@ -202,8 +236,10 @@ class Runner:
         if status == "filled" and not self._same_number(snapshot.filled_qty, pending.qty):
             self._fail_closed("invalid_terminal_sell_fill")
             return False
-        delta_qty = snapshot.filled_qty - pending.processed_filled_qty
-        delta_notional = snapshot.filled_notional - pending.processed_filled_notional
+        filled_qty = snapshot.filled_qty if snapshot.filled_qty is not None else 0.0
+        filled_notional = snapshot.filled_notional if snapshot.filled_notional is not None else 0.0
+        delta_qty = filled_qty - pending.processed_filled_qty
+        delta_notional = filled_notional - pending.processed_filled_notional
         if delta_qty < 0 or delta_notional < 0 or (delta_qty == 0) != (delta_notional == 0):
             self._fail_closed("decreasing_or_invalid_sell_fill")
             return False
@@ -243,6 +279,11 @@ class Runner:
             self.risk.positions = [item for item in self.risk.positions if item is not position]
         else:
             position.qty = remaining
+        realized_pnl = (exit_price - position.avg_entry_price) * qty
+        if realized_pnl < 0:
+            record = getattr(self.risk, "record_realized_loss", None)
+            if callable(record):
+                record(-realized_pnl)
         return True
 
     def reconcile(self) -> None:
@@ -265,9 +306,18 @@ class Runner:
                 price = self._exit_decision_price(pos.ticker)
                 if price is None:
                     return
-                reason = self.exit_manager.evaluate(pos, price)
-                if reason:
-                    self._close(pos, price, reason)
+                if self.dynamic_exit is not None:
+                    stop_reason = self.exit_manager.hard_stop(pos, price)
+                    if stop_reason:
+                        self._close(pos, price, stop_reason)
+                    else:
+                        dynamic_reason = self.dynamic_exit.decide(pos, price)
+                        if dynamic_reason:
+                            self._close(pos, price, dynamic_reason)
+                else:
+                    reason = self.exit_manager.evaluate(pos, price)
+                    if reason:
+                        self._close(pos, price, reason)
         except Exception as error:
             print(f"[error] manage_exits: {error}")
             self._fail_closed("exit_exception")
@@ -337,6 +387,7 @@ class Runner:
             session_id=self.risk.session_id,
             session_entry_count=self.risk.session_entry_count,
             cutoff_latched=self.risk.cutoff_latched,
+            daily_realized_loss_pct=self.risk.daily_realized_loss_pct,
             reservations=list(self.risk.reservations.values()),
             pending_orders=list(self.pending_orders),
         )
@@ -426,6 +477,8 @@ class Runner:
             or not self._snapshot_is_fresh(snapshot.observed_at)
         ):
             return False
+        if status in _TERMINAL_STATUSES and snapshot.filled_qty is None and snapshot.filled_notional is None:
+            return True
         if not (self._nonnegative(snapshot.filled_qty) and self._nonnegative(snapshot.filled_notional)):
             return False
         if snapshot.filled_qty > pending.qty:
@@ -435,6 +488,22 @@ class Runner:
         return snapshot.filled_qty == 0 or (
             self._positive(snapshot.filled_avg_price)
             and self._same_number(snapshot.filled_notional, snapshot.filled_qty * snapshot.filled_avg_price)
+        )
+
+    def _uncertain_stale_collision(self, pending: Order, snapshot: Order) -> bool:
+        """True when an unbound intent's client-ID lookup returned a broker order that
+        disagrees on identity (side/qty/ticker/broker id) — a stale collision under a
+        reused client order id, not our own order. Such a snapshot is uncertain: the
+        engine must not treat it as a validated fill nor as a fatal mismatch."""
+        if pending.id != pending.client_order_id:
+            return False
+        if pending.side is not Side.BUY:
+            return False
+        return (
+            snapshot.id != pending.id
+            or snapshot.side is not pending.side
+            or not self._same_number(snapshot.qty, pending.qty)
+            or snapshot.ticker != pending.ticker
         )
 
     def _snapshot_is_fresh(self, observed_at) -> bool:

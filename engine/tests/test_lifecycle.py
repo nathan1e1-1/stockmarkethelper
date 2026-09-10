@@ -1,3 +1,4 @@
+import sys
 from copy import deepcopy
 from datetime import datetime, time, timedelta, timezone
 
@@ -5,7 +6,7 @@ import pytest
 
 from autotrader.lifecycle import EngineLifecycle
 from autotrader.main import _parse_args
-from autotrader.models import AccountSnapshot, Equity, Order, Position, PositionsSnapshot, RiskState, Side
+from autotrader.models import AccountSnapshot, Equity, Order, Position, PositionsSnapshot, Quote, RiskState, Side
 from autotrader.risk import RiskManager
 from autotrader.runner import Runner
 from autotrader.state import State, StateStore
@@ -80,7 +81,9 @@ class Executor:
 
 
 class Provider:
-    pass
+    def latest_quote(self, ticker, *, now=None):
+        timestamp = now or NOW
+        return Quote(ticker=ticker, price=100.0, source_timestamp=timestamp, observed_at=timestamp)
 
 
 def lifecycle(*, store=None, executor=None):
@@ -93,17 +96,20 @@ def lifecycle(*, store=None, executor=None):
     return EngineLifecycle(cfg, executor, risk, runner, store, clock=lambda: NOW), risk, runner, executor, store
 
 
-def test_startup_reconciliation_orphan_position_halts_until_broker_reports_flat():
+def test_startup_reconciliation_adopts_orphan_position_without_selling():
     engine, risk, _, executor, _ = lifecycle(executor=Executor(positions=[Position("AAPL", 4, 100.0)]))
 
-    assert engine.startup_reconcile() is False
+    assert engine.startup_reconcile() is True
 
-    assert risk.state is RiskState.HALTING
-    assert executor.exit_requests == [("AAPL", 4, "exit-2026-09-02-AAPL-orphan")]
-    assert engine.can_scan is False
+    assert risk.state is RiskState.ACTIVE
+    assert executor.exit_requests == []
+    assert [(position.ticker, position.qty) for position in risk.positions] == [("AAPL", 4)]
+    assert engine.can_scan is True
 
 
-def test_orphan_nonterminal_sell_is_tracked_without_submitting_a_second_exit():
+def test_orphan_nonterminal_sell_never_triggers_a_duplicate_exit():
+    """A broker-originated sell is never adopted as a local intent and never causes
+    the engine to submit its own exit. The broker position is adopted instead."""
     orphan_sell = Order(
         "orphan-sell", "AAPL", Side.SELL, 4, status="accepted", client_order_id="broker-sell-aapl",
         timestamp=NOW, observed_at=NOW, filled_qty=0.0, filled_notional=0.0,
@@ -116,7 +122,7 @@ def test_orphan_nonterminal_sell_is_tracked_without_submitting_a_second_exit():
 
     assert risk.state is RiskState.HALTING
     assert executor.exit_requests == []
-    assert [order.id for order in runner.pending_orders] == ["orphan-sell"]
+    assert [order.id for order in runner.pending_orders] == []
     assert engine.can_scan is False
     executor.positions_value = []
     executor.orders_value = [Order(
@@ -125,15 +131,9 @@ def test_orphan_nonterminal_sell_is_tracked_without_submitting_a_second_exit():
     )]
 
     assert engine.startup_reconcile() is True
-    assert risk.state is RiskState.HALTED
-    executor.positions_value = []
-    executor.orders_value = [Order("exit-broker", "AAPL", Side.SELL, 4, status="filled",
-                                   client_order_id="exit-2026-09-02-AAPL-orphan", timestamp=NOW, observed_at=NOW,
-                                   filled_qty=4.0, filled_notional=400.0, filled_avg_price=100.0)]
-
-    assert engine.startup_reconcile() is True
-    assert risk.state is RiskState.HALTED
-    assert engine.can_scan is False
+    assert risk.state is RiskState.ACTIVE
+    assert risk.positions == []
+    assert executor.exit_requests == []
 
 
 def test_cutoff_latches_before_cleanup_and_never_runs_an_entry_scan():
@@ -144,7 +144,26 @@ def test_cutoff_latches_before_cleanup_and_never_runs_an_entry_scan():
     engine.tick(datetime(2026, 9, 2, 19, 56, tzinfo=timezone.utc), ["MSFT"])
 
     assert risk.cutoff_latched is True
-    assert executor.exit_requests == [("AAPL", 4, "exit-2026-09-02-AAPL-orphan")]
+    assert risk.state is RiskState.HALTING
+    assert risk.halt_reason == "session_cutoff"
+    # Flatten-at-close is the one exit pass still allowed after the cutoff halt: the
+    # cutoff stops entries, it must not also suppress the end-of-day flatten.
+    assert [request[0] for request in executor.exit_requests] == ["AAPL"]
+
+
+def test_tick_flattens_positions_at_flatten_time_and_skips_entry_scan():
+    """At/after the configured flatten time the engine must actually flatten held
+    positions (submit exits), not merely latch the cutoff and drop the exit pass."""
+    engine, risk, runner, executor, _ = lifecycle(executor=Executor(positions=[Position("AAPL", 4, 100.0)]))
+    assert engine.startup_reconcile() is True
+    runner.run_once = lambda universe: pytest.fail("flatten cutoff must prevent entry scans")
+
+    engine.tick(datetime(2026, 9, 2, 19, 55, tzinfo=timezone.utc), ["MSFT"])
+
+    assert risk.cutoff_latched is True
+    assert risk.state is RiskState.HALTING
+    assert [request[0] for request in executor.exit_requests] == ["AAPL"]
+    assert runner.flattened is True
 
 
 def test_rearm_requires_next_session_and_clean_broker_reconciliation():
@@ -203,16 +222,19 @@ def test_lifecycle_refuses_to_start_without_paper_mode_or_state_store():
         EngineLifecycle(cfg, runner.executor, risk, runner, None, clock=lambda: NOW)
 
 
-def test_persisted_pending_order_missing_from_broker_keeps_engine_halting():
+def test_persisted_pending_order_missing_from_broker_recovers_from_broker_truth():
+    """A ghost local intent with no broker record is recoverable: broker truth says
+    the order does not exist, so recovery releases it instead of wedging the session."""
     pending = Order("buy-1", "AAPL", Side.BUY, 2, status="accepted", client_order_id="entry-2026-09-02-AAPL",
                     timestamp=NOW, observed_at=NOW, filled_qty=0.0, filled_notional=0.0)
     loaded = State(risk_state=RiskState.ACTIVE, session_id="2026-09-02", pending_orders=[pending])
-    engine, risk, _, _, _ = lifecycle(store=Store(loaded))
+    engine, risk, runner, _, _ = lifecycle(store=Store(loaded))
 
-    assert engine.startup_reconcile() is False
+    assert engine.startup_reconcile() is True
 
-    assert risk.state is RiskState.HALTING
-    assert engine.can_scan is False
+    assert risk.state is RiskState.ACTIVE
+    assert runner.pending_orders == []
+    assert engine.can_scan is True
 
 
 def test_main_exposes_local_only_rearm_flag():
@@ -231,19 +253,39 @@ def test_startup_uses_a_fresh_broker_equity_snapshot_as_the_risk_baseline():
     assert runner.equity.equity == 80_000.0
 
 
-def test_persisted_position_missing_from_broker_stays_halting_and_cannot_scan():
+def test_same_session_restart_preserves_persisted_day_start_baseline():
+    """A same-session restart must NOT clobber day_start_equity with the current broker
+    equity (which zeroes the dashboard's day P&L). The persisted baseline must survive."""
+    loaded = State(
+        equity=Equity(60_000.0, 100_000.0, 100_000.0, "2026-09-02"),  # current 60k, day-start 100k
+        risk_state=RiskState.ACTIVE,
+        session_id="2026-09-02",
+    )
+    engine, risk, runner, _, _ = lifecycle(store=Store(loaded), executor=Executor(equity=60_000.0))
+
+    assert engine.startup_reconcile() is True
+
+    assert risk.day_start_equity == 100_000.0, "day-start baseline must be preserved on same-day restart"
+    assert runner.equity.equity == 60_000.0
+
+
+def test_persisted_position_missing_from_broker_is_recovered_flat():
+    """Broker truth (flat) is authoritative: a stale local position is dropped rather
+    than wedging the session or being sold."""
     loaded = State(
         equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
         positions=[Position("AAPL", 2, 100.0)],
         risk_state=RiskState.ACTIVE,
         session_id="2026-09-02",
     )
-    engine, risk, _, _, _ = lifecycle(store=Store(loaded), executor=Executor(positions=[]))
+    engine, risk, _, executor, _ = lifecycle(store=Store(loaded), executor=Executor(positions=[]))
 
-    assert engine.startup_reconcile() is False
+    assert engine.startup_reconcile() is True
 
-    assert risk.state is RiskState.HALTING
-    assert engine.can_scan is False
+    assert risk.state is RiskState.ACTIVE
+    assert risk.positions == []
+    assert executor.exit_requests == []
+    assert engine.can_scan is True
 
 
 def test_persisted_equity_never_bypasses_invalid_fresh_broker_account_snapshot():
@@ -256,7 +298,8 @@ def test_persisted_equity_never_bypasses_invalid_fresh_broker_account_snapshot()
 
     assert engine.startup_reconcile() is False
 
-    assert risk.state is not RiskState.ACTIVE
+    # Recovery may reconcile books from broker truth, but the engine cannot scan
+    # without a valid fresh account snapshot.
     assert engine.can_scan is False
 
 
@@ -274,3 +317,585 @@ def test_restored_active_prior_session_requires_local_next_session_rearm():
     assert engine.can_scan is False
     assert engine.request_rearm("2026-09-02") is True
     assert risk.state is RiskState.ACTIVE
+
+
+def test_local_pending_buy_backed_position_is_not_treated_as_orphan():
+    """A broker position created by OUR OWN in-flight acknowledged buy (fill not yet reconciled)
+    must not be orphan-flushed. The earlier design decided orphan-ness on a pre-reconcile snapshot,
+    then _ensure_exits force-sold the position the engine itself had just bought."""
+    local_pending = Order(
+        "buy-broker-1", "AAPL", Side.BUY, 4, status="accepted", client_order_id="entry-2026-09-02-AAPL",
+        timestamp=NOW, observed_at=NOW, filled_qty=0.0, filled_notional=0.0,
+    )
+    from autotrader.models import Reservation
+    reservation = Reservation("entry-2026-09-02-AAPL", "AAPL", 4.0, 100.0, NOW)
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        risk_state=RiskState.ACTIVE,
+        session_id="2026-09-02",
+        session_entry_count=1,
+        reservations=[reservation],
+        pending_orders=[local_pending],
+    )
+    # Broker truth: the buy already filled into a position; the committed broker buy order is filled.
+    broker_filled_buy = Order(
+        "buy-broker-1", "AAPL", Side.BUY, 4, status="filled", client_order_id="entry-2026-09-02-AAPL",
+        timestamp=NOW, observed_at=NOW, filled_qty=4.0, filled_notional=400.0, filled_avg_price=100.0,
+    )
+    executor = Executor(positions=[Position("AAPL", 4, 100.0)], orders=[broker_filled_buy])
+    engine, risk, runner, executor, _ = lifecycle(store=Store(loaded), executor=executor)
+
+    assert engine.startup_reconcile() is True
+    assert risk.state is RiskState.ACTIVE
+    assert executor.exit_requests == []
+    assert [(position.ticker, position.qty) for position in risk.positions] == [("AAPL", 4)]
+
+
+def test_recovery_never_sells_position_backed_by_local_pending_buy():
+    """Destructive NVDA regression guard: recovery must adopt a broker position even when
+    our own in-flight BUY is about to reconcile, and must never orphan-flush it."""
+    position = Position("NVDA", 121, 224.43, opened_at=NOW)
+    local_pending_buy = Order(
+        "buy-broker-1", "NVDA", Side.BUY, 121, status="accepted",
+        client_order_id="entry-2026-09-02-NVDA", timestamp=NOW, observed_at=NOW,
+        filled_qty=0.0, filled_notional=0.0,
+    )
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        risk_state=RiskState.HALTING,
+        session_id="2026-09-02",
+        positions=[position],
+        pending_orders=[local_pending_buy],
+    )
+    executor = Executor(positions=[position], orders=[])
+    engine, risk, runner, executor, _ = lifecycle(store=Store(loaded), executor=executor)
+    engine._restore_state()
+
+    engine._recover_from_broker(executor.positions_value, [], NOW)
+
+    assert executor.exit_requests == []
+    assert [(p.ticker, p.qty) for p in risk.positions] == [("NVDA", 121)]
+
+
+def test_unbound_intent_without_broker_record_is_not_missing_local_order():
+    """An unbound (submitted, id==client) intent whose client-ID lookup returns no broker
+    record is an uncertain submission that the runner holds for retry. It must NOT be
+    reported as a missing local order (which would fatal-halt reconciliation)."""
+    from autotrader.models import Reservation
+
+    local_pending = Order(
+        "entry-2026-09-02-AAPL", "AAPL", Side.BUY, 2, status="submitted",
+        client_order_id="entry-2026-09-02-AAPL", timestamp=NOW, observed_at=NOW,
+        filled_qty=0.0, filled_notional=0.0,
+    )
+    reservation = Reservation("entry-2026-09-02-AAPL", "AAPL", 2.0, 100.0, NOW)
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        risk_state=RiskState.ACTIVE,
+        session_id="2026-09-02",
+        reservations=[reservation],
+        pending_orders=[local_pending],
+    )
+    # Broker has no record for this client ID.
+    executor = Executor(positions=[], orders=[])
+    engine, risk, runner, executor, _ = lifecycle(store=Store(loaded), executor=executor)
+
+    engine._restore_state()
+
+    assert engine._missing_local_orders() is False
+    assert risk.state is RiskState.ACTIVE
+
+
+def test_bound_intent_without_broker_record_still_counts_as_missing():
+    """An acknowledged (bound) pending order whose broker-id lookup returns nothing is a
+    genuine missing-broker-order and MUST still halt reconciliation (fail-closed)."""
+    local_pending = Order(
+        "broker-ack-1", "AAPL", Side.BUY, 2, status="accepted",
+        client_order_id="entry-2026-09-02-AAPL", timestamp=NOW, observed_at=NOW,
+        filled_qty=0.0, filled_notional=0.0,
+    )
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        risk_state=RiskState.HALTING,
+        session_id="2026-09-02",
+        session_entry_count=1,
+        pending_orders=[local_pending],
+    )
+    executor = Executor(positions=[], orders=[])
+    engine, risk, runner, executor, _ = lifecycle(store=Store(loaded), executor=executor)
+
+    engine._restore_state()
+
+    assert engine._missing_local_orders() is True
+
+
+def test_recovery_books_terminal_sell_fill_and_realized_loss():
+    """Recovery must record a broker-confirmed terminal (filled) sell, so realized P&L
+    and the daily-loss gate are not lost. A local pending SELL already filled at the
+    broker is absent from open_orders(), so it used to be pruned unbooked."""
+    position = Position("AAPL", 4, 100.0, opened_at=NOW)
+    pending_sell = Order(
+        "sell-broker-1", "AAPL", Side.SELL, 4, status="submitted",
+        client_order_id="exit-2026-09-02-AAPL-take_profit",
+        timestamp=NOW, observed_at=NOW, filled_qty=0.0, filled_notional=0.0,
+    )
+    broker_filled_sell = Order(
+        "sell-broker-1", "AAPL", Side.SELL, 4, status="filled",
+        client_order_id="exit-2026-09-02-AAPL-take_profit",
+        timestamp=NOW, observed_at=NOW, filled_qty=4.0, filled_notional=380.0,
+        filled_avg_price=95.0,
+    )
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        positions=[position],
+        risk_state=RiskState.HALTING,
+        halt_reason="broker_reconciliation_required",
+        session_id="2026-09-02",
+        pending_orders=[pending_sell],
+    )
+    # Broker truth: flat position, no open orders; the sell itself is FILLED.
+    executor = Executor(positions=[], orders=[broker_filled_sell])
+    engine, risk, runner, executor, _ = lifecycle(store=Store(loaded), executor=executor)
+
+    assert engine.startup_reconcile() is True
+
+    assert risk.positions == []
+    assert executor.exit_requests == []
+    assert len(runner.closed_trades) == 1
+    trade = runner.closed_trades[0]
+    assert trade.ticker == "AAPL"
+    assert trade.qty == 4
+    assert trade.realized_pnl == pytest.approx((95.0 - 100.0) * 4)
+    assert risk.daily_realized_loss_pct == pytest.approx(20.0 / 100_000.0)
+
+
+def test_recovery_keeps_still_open_order_bound():
+    """A local intent the broker still reports as open survives recovery: its client id
+    stays confirmed, so it remains in pending_orders instead of being dropped."""
+    position = Position("AAPL", 4, 100.0, opened_at=NOW)
+    pending_sell = Order(
+        "sell-broker-1", "AAPL", Side.SELL, 4, status="submitted",
+        client_order_id="exit-2026-09-02-AAPL-stop_loss",
+        timestamp=NOW, observed_at=NOW, filled_qty=0.0, filled_notional=0.0,
+    )
+    broker_open_sell = Order(
+        "sell-broker-1", "AAPL", Side.SELL, 4, status="new",
+        client_order_id="exit-2026-09-02-AAPL-stop_loss",
+        timestamp=NOW, observed_at=NOW, filled_qty=0.0, filled_notional=0.0,
+    )
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        positions=[position],
+        risk_state=RiskState.HALTING,
+        halt_reason="broker_reconciliation_required",
+        session_id="2026-09-02",
+        pending_orders=[pending_sell],
+    )
+    executor = Executor(positions=[position], orders=[broker_open_sell])
+    engine, risk, runner, executor, _ = lifecycle(store=Store(loaded), executor=executor)
+
+    assert engine.startup_reconcile() is True
+
+    assert [order.client_order_id for order in runner.pending_orders] == ["exit-2026-09-02-AAPL-stop_loss"]
+    assert [(p.ticker, p.qty) for p in risk.positions] == [("AAPL", 4)]
+    assert runner.closed_trades == []
+    assert executor.exit_requests == []
+
+
+def test_recovery_drops_true_ghost_without_broker_record():
+    """A local intent with no broker record at all (neither open nor terminal) is a true
+    ghost and must be released by recovery, not kept as a wedge."""
+    pending_sell = Order(
+        "sell-broker-1", "AAPL", Side.SELL, 4, status="submitted",
+        client_order_id="exit-2026-09-02-AAPL-stop_loss",
+        timestamp=NOW, observed_at=NOW, filled_qty=0.0, filled_notional=0.0,
+    )
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        positions=[Position("AAPL", 4, 100.0, opened_at=NOW)],
+        risk_state=RiskState.HALTING,
+        halt_reason="broker_reconciliation_required",
+        session_id="2026-09-02",
+        pending_orders=[pending_sell],
+    )
+    # Broker is flat with no record of the sell at all.
+    executor = Executor(positions=[], orders=[])
+    engine, risk, runner, executor, _ = lifecycle(store=Store(loaded), executor=executor)
+
+    assert engine.startup_reconcile() is True
+
+    assert risk.state is RiskState.ACTIVE
+    assert runner.pending_orders == []
+    assert runner.closed_trades == []
+    assert executor.exit_requests == []
+
+
+class MultiEntryConfig(Config):
+    max_position_pct = 0.05
+    max_gross_exposure_pct = 0.05
+    max_positions = 5
+    max_entries_per_session = sys.maxsize
+    kill_switch_pct = 0.25
+    daily_loss_pct = 0.05
+    stop_loss_pct = 0.05
+    take_profit_pct = 0.05
+    risk_per_position_pct = 0.01
+    max_daily_risk_pct = 0.05
+    risk_profile = "multi-entry"
+
+
+def multi_lifecycle(*, store=None, executor=None):
+    cfg = MultiEntryConfig()
+    risk = RiskManager(cfg, clock=lambda: NOW, session_id="2026-09-02")
+    executor = executor or Executor()
+    store = store or Store()
+    runner = Runner(Provider(), None, executor, risk, cfg, state_store=store, clock=lambda: NOW)
+    runner.equity = Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02")
+    return EngineLifecycle(cfg, executor, risk, runner, store, clock=lambda: NOW), risk, runner, executor, store
+
+
+def test_multi_entry_tick_keeps_trading_when_equity_above_daily_stop():
+    engine, risk, runner, executor, _ = multi_lifecycle()
+
+    assert engine.startup_reconcile() is True
+    # 94k < day_start*(1-0.05)=95k: inside the daily-stop band; multi-entry must NOT halt.
+    executor.equity = 94_000.0
+    assert engine.tick(NOW, []) is True
+    assert risk.state is RiskState.ACTIVE
+
+
+def test_multi_entry_tick_hard_stop_floor_still_halts():
+    engine, risk, runner, executor, _ = multi_lifecycle()
+
+    assert engine.startup_reconcile() is True
+    executor.equity = 74_000.0  # <= 100k*(1-0.25): hard stop floor still halts
+    runner.run_once = lambda universe: None
+    engine.tick(NOW, ["AAPL"])
+    assert risk.state is not RiskState.ACTIVE
+
+
+def test_multi_entry_restore_keeps_daily_realized_loss_across_restart():
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        risk_state=RiskState.ACTIVE,
+        session_id="2026-09-02",
+        daily_realized_loss_pct=0.04,
+    )
+    engine, risk, runner, executor, _ = multi_lifecycle(store=Store(loaded))
+
+    assert engine.startup_reconcile() is True
+    assert risk.daily_realized_loss_pct == 0.04
+
+
+def test_restored_recovering_state_exits_to_active():
+    """Regression for the begin_halt dead-end: begin_halt only promotes ACTIVE->HALTING,
+    so a restored RECOVERING state must still reconcile back to ACTIVE."""
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        risk_state=RiskState.RECOVERING,
+        session_id="2026-09-02",
+    )
+    engine, risk, _, executor, _ = lifecycle(store=Store(loaded))
+
+    assert engine.startup_reconcile() is True
+
+    assert risk.state is RiskState.ACTIVE
+    assert executor.exit_requests == []
+    assert engine.can_scan is True
+
+
+def test_recovery_never_sells_held_broker_position():
+    """Recovery must adopt a broker-confirmed position, never sell it."""
+    position = Position("AAPL", 4, 100.0, opened_at=NOW)
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        risk_state=RiskState.HALTING,
+        session_id="2026-09-02",
+        positions=[position],
+    )
+    executor = Executor(positions=[position], orders=[])
+    engine, risk, runner, executor, _ = lifecycle(store=Store(loaded), executor=executor)
+
+    engine.startup_reconcile()
+
+    assert executor.exit_requests == []
+    assert risk.state is RiskState.ACTIVE
+    assert [(p.ticker, p.qty) for p in risk.positions] == [("AAPL", 4)]
+
+
+def test_hard_stop_halt_survives_broker_divergence():
+    """A genuine -25% kill-switch halt must NOT be cleared when a broker divergence
+    is detected in the same reconcile cycle."""
+    position = Position("AAPL", 4, 100.0, opened_at=NOW)
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        risk_state=RiskState.HALTING,
+        session_id="2026-09-02",
+        halt_reason="hard_stop",
+        positions=[position],
+    )
+    # Broker holds our AAPL *and* an extra orphan MSFT -> a real local<->broker divergence.
+    executor = Executor(positions=[position, Position("MSFT", 3, 50.0, opened_at=NOW)], orders=[])
+    engine, risk, runner, executor, _ = lifecycle(store=Store(loaded), executor=executor)
+
+    engine.startup_reconcile()
+
+    assert risk.state is not RiskState.ACTIVE
+    assert risk.halt_reason == "hard_stop"
+    assert executor.exit_requests == []
+
+
+def test_daily_stop_halt_survives_broker_divergence():
+    position = Position("AAPL", 4, 100.0, opened_at=NOW)
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        risk_state=RiskState.HALTING,
+        session_id="2026-09-02",
+        halt_reason="daily_stop",
+        positions=[position],
+    )
+    executor = Executor(positions=[position, Position("MSFT", 3, 50.0, opened_at=NOW)], orders=[])
+    engine, risk, runner, executor, _ = lifecycle(store=Store(loaded), executor=executor)
+
+    engine.startup_reconcile()
+
+    assert risk.state is not RiskState.ACTIVE
+    assert risk.halt_reason == "daily_stop"
+    assert executor.exit_requests == []
+
+
+def test_true_safety_halt_survives_repeated_broker_divergence():
+    """The post-reconcile re-read must not clobber a genuine safety halt on a later
+    cycle either: a latched hard_stop stays latched across repeated reconciles."""
+    position = Position("AAPL", 4, 100.0, opened_at=NOW)
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        risk_state=RiskState.HALTING,
+        session_id="2026-09-02",
+        halt_reason="hard_stop",
+        positions=[position],
+    )
+    executor = Executor(positions=[position, Position("MSFT", 3, 50.0, opened_at=NOW)], orders=[])
+    engine, risk, runner, executor, _ = lifecycle(store=Store(loaded), executor=executor)
+
+    engine.startup_reconcile()
+    engine._reconcile_and_cleanup()
+
+    assert risk.state is not RiskState.ACTIVE
+    assert risk.halt_reason == "hard_stop"
+    assert executor.exit_requests == []
+
+
+class BlockedOrdersExecutor(Executor):
+    """Simulates a transient broker order-snapshot failure (open_orders returns None)."""
+
+    def __init__(self, positions=None, orders=None, equity=100_000.0, *, block_orders=False):
+        super().__init__(positions=positions, orders=orders, equity=equity)
+        self.block_orders = block_orders
+
+    def open_orders(self, *, now=None):
+        if self.block_orders:
+            return None
+        return super().open_orders(now=now)
+
+
+def test_persisted_safety_halt_survives_account_snapshot_failure():
+    """A persisted hard_stop must survive an account snapshot failure at restore."""
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        risk_state=RiskState.HALTING,
+        session_id="2026-09-02",
+        halt_reason="hard_stop",
+    )
+    executor = Executor(positions=[], orders=[], equity=0.0)  # account snapshot fails (non-positive)
+    engine, risk, runner, executor, _ = lifecycle(store=Store(loaded), executor=executor)
+
+    engine.startup_reconcile()
+
+    assert risk.state is not RiskState.ACTIVE
+    assert risk.halt_reason in ("hard_stop", "invalid_account_snapshot")
+
+
+def test_persisted_safety_halt_survives_invalid_broker_snapshot():
+    """A persisted daily_stop must survive a transient broker order-snapshot failure,
+    even after the snapshot recovers (recovery must not clear the safety halt)."""
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        risk_state=RiskState.HALTING,
+        session_id="2026-09-02",
+        halt_reason="daily_stop",
+    )
+    executor = BlockedOrdersExecutor(positions=[], orders=[], block_orders=True)
+    engine, risk, runner, executor, _ = lifecycle(store=Store(loaded), executor=executor)
+
+    engine.startup_reconcile()
+
+    assert risk.state is not RiskState.ACTIVE
+    # Once the broker snapshot recovers, the genuine safety halt must still survive.
+    executor.block_orders = False
+    engine._reconcile_and_cleanup()
+
+    assert risk.state is not RiskState.ACTIVE
+    assert risk.halt_reason == "daily_stop"
+
+
+def test_recovering_state_with_safety_reason_is_not_recovered():
+    """A persisted RECOVERING state carrying a genuine HALT reason must stay
+    fail-closed, mirroring the HALTING guard."""
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        risk_state=RiskState.RECOVERING,
+        session_id="2026-09-02",
+        halt_reason="hard_stop",
+    )
+    engine, risk, runner, executor, _ = lifecycle(store=Store(loaded))
+
+    engine.startup_reconcile()
+
+    assert risk.state is not RiskState.ACTIVE
+    assert risk.halt_reason == "hard_stop"
+
+
+def test_recovering_safety_halt_survives_broker_divergence():
+    """Recovery must never clear a HALT-class halt_reason for ANY non-ACTIVE state.
+
+    A persisted RECOVERING + hard_stop whose reconcile also sees a broker orphan must
+    not let broker_reconciliation_required overwrite the safety reason and then be
+    auto-recovered to ACTIVE."""
+    position = Position("AAPL", 4, 100.0, opened_at=NOW)
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        risk_state=RiskState.RECOVERING,
+        session_id="2026-09-02",
+        halt_reason="hard_stop",
+        positions=[position],
+    )
+    executor = Executor(positions=[position, Position("MSFT", 3, 50.0, opened_at=NOW)], orders=[])
+    engine, risk, runner, executor, _ = lifecycle(store=Store(loaded), executor=executor)
+
+    engine.startup_reconcile()
+
+    assert risk.state is not RiskState.ACTIVE
+    assert risk.halt_reason == "hard_stop"
+    assert executor.exit_requests == []
+
+
+def test_startup_with_held_broker_position_recovers_active():
+    """Startup with a HALTING state and a real broker position recovers to ACTIVE,
+    adopting the position, and never sells."""
+    position = Position("AAPL", 4, 100.0, opened_at=NOW)
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        risk_state=RiskState.HALTING,
+        session_id="2026-09-02",
+        halt_reason="broker_reconciliation_required",
+    )
+    executor = Executor(positions=[position], orders=[])
+    engine, risk, runner, executor, _ = lifecycle(store=Store(loaded), executor=executor)
+
+    assert engine.startup_reconcile() is True
+    assert risk.state is RiskState.ACTIVE
+    assert [(p.ticker, p.qty) for p in risk.positions] == [("AAPL", 4)]
+    assert executor.exit_requests == []
+
+
+def test_cross_day_rollover_starts_fresh_session():
+    """A long-lived process must roll into a fresh session when the date changes,
+    resetting session-scoped counters, even while holding a broker position."""
+    engine, risk, runner, _, _ = lifecycle()
+    assert engine.startup_reconcile() is True
+    # Move clock to next session.
+    next_day = datetime(2026, 9, 3, 9, 30, tzinfo=timezone.utc)
+    risk.session_entry_count = 3
+    risk.cutoff_latched = True
+    risk.daily_realized_loss_pct = 0.04
+    engine._clock = lambda: next_day
+    risk._clock = lambda: next_day
+
+    engine._ensure_rollover("2026-09-03")
+
+    assert risk.session_id == "2026-09-03"
+    assert risk.session_entry_count == 0
+    assert risk.cutoff_latched is False
+    assert risk.daily_realized_loss_pct == 0.0
+    assert risk.state is RiskState.ACTIVE
+
+
+def test_rollover_does_not_bypass_explicit_rearm():
+    """A prior-session ACTIVE state with _requires_rearm must NOT be auto-rolled at
+    startup by _ensure_rollover — it requires an explicit local rearm."""
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-01"),
+        risk_state=RiskState.ACTIVE,
+        session_id="2026-09-01",
+    )
+    executor = Executor(positions=[], orders=[], equity=100_000.0)
+    engine, risk, runner, _, _ = lifecycle(store=Store(loaded), executor=executor)
+
+    assert engine.startup_reconcile() is False
+    assert risk.state is not RiskState.ACTIVE
+    assert engine._requires_rearm is True
+    next_day = datetime(2026, 9, 2, 9, 30, tzinfo=timezone.utc)
+    engine._clock = lambda: next_day
+    risk._clock = lambda: next_day
+
+    engine._ensure_rollover("2026-09-02")
+
+    assert risk.session_id == "2026-09-01"  # not rolled; rearm still required
+    assert engine._requires_rearm is True
+
+
+def test_rollover_refreshes_day_start_equity_baseline():
+    """A cross-day rollover must reset day_start_equity/peak_equity to the new day's
+    broker equity so stop baselines are fresh."""
+    executor = Executor(equity=80_000.0)
+    engine, risk, runner, executor, _ = lifecycle(executor=executor)
+    assert engine.startup_reconcile() is True
+    executor.equity = 95_000.0  # the new session's broker equity differs from startup
+    next_day = datetime(2026, 9, 3, 9, 30, tzinfo=timezone.utc)
+    engine._clock = lambda: next_day
+    risk._clock = lambda: next_day
+
+    engine._ensure_rollover("2026-09-03")
+
+    assert risk.day_start_equity == 95_000.0
+    assert risk.peak_equity == 95_000.0
+    assert risk.session_id == "2026-09-03"
+
+
+class BlockedPositionsExecutor(Executor):
+    """Simulates a transient broker positions-snapshot failure (positions_snapshot
+    returns None)."""
+
+    def __init__(self, positions=None, orders=None, equity=100_000.0, *, block_positions=False):
+        super().__init__(positions=positions, orders=orders, equity=equity)
+        self.block_positions = block_positions
+
+    def positions_snapshot(self, *, now=None):
+        if self.block_positions:
+            return None
+        return super().positions_snapshot(now=now)
+
+
+def test_rollover_does_not_drop_positions_when_broker_snapshot_unreadable():
+    """A failed broker read during rollover must NOT flatten/drop live positions."""
+    position = Position("AAPL", 4, 100.0, opened_at=NOW)
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        positions=[position],
+        risk_state=RiskState.ACTIVE,
+        session_id="2026-09-02",
+    )
+    executor = BlockedPositionsExecutor(positions=[position], orders=[])
+    engine, risk, runner, executor, _ = lifecycle(store=Store(loaded), executor=executor)
+    assert engine.startup_reconcile() is True
+    assert [(p.ticker, p.qty) for p in risk.positions] == [("AAPL", 4)]
+    next_day = datetime(2026, 9, 3, 9, 30, tzinfo=timezone.utc)
+    engine._clock = lambda: next_day
+    risk._clock = lambda: next_day
+    executor.block_positions = True  # broker positions read now fails
+
+    engine._ensure_rollover("2026-09-03")
+
+    assert [(p.ticker, p.qty) for p in risk.positions] == [("AAPL", 4)]
+    assert risk.session_id == "2026-09-02"  # not rolled; broker unreadable

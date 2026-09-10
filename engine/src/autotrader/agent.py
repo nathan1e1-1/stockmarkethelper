@@ -54,7 +54,7 @@ class OllamaAgent:
         try:
             resp = self.session.post(
                 f"{self.base_url}/api/generate",
-                json={"model": self.model, "prompt": prompt, "stream": False},
+                json={"model": self.model, "prompt": prompt, "stream": False, "format": "json"},
                 timeout=120,
             )
             resp.raise_for_status()

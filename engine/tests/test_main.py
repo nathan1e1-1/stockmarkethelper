@@ -1,0 +1,274 @@
+import socket
+import threading
+import time
+
+from autotrader.main import _parse_args, _port_busy, _wait_port_free, run_recovery_cli
+
+
+def test_port_busy_true_when_something_is_listening():
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+    try:
+        assert _port_busy("127.0.0.1", port) is True
+    finally:
+        server.close()
+
+
+def test_port_busy_false_when_port_is_free():
+    assert _port_busy("127.0.0.1", 0) is False
+
+
+def test_port_busy_ignores_time_wait_from_closed_connection():
+    # A freshly closed connection leaves a TIME_WAIT socket on the listener port.
+    # Nothing is listening, so the probe must report the port as free (SO_REUSEADDR),
+    # not misread the leftover TIME_WAIT as "busy".
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client.connect(("127.0.0.1", port))
+    connection, _ = server.accept()
+    client.close()
+    connection.close()
+    server.close()
+    assert _port_busy("127.0.0.1", port) is False
+
+
+def test_wait_port_free_returns_false_when_still_busy():
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+    try:
+        assert _wait_port_free("127.0.0.1", port, attempts=1, interval=0.01) is False
+    finally:
+        server.close()
+
+
+def test_wait_port_free_returns_true_when_freed_within_attempts():
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+
+    def release():
+        time.sleep(0.2)
+        server.close()
+
+    releaser = threading.Thread(target=release)
+    releaser.start()
+    try:
+        assert _wait_port_free("127.0.0.1", port, attempts=20, interval=0.05) is True
+    finally:
+        releaser.join(timeout=2)
+        try:
+            server.close()
+        except OSError:
+            pass
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+from autotrader.main import publish_pnl_attribution
+from autotrader.models import Equity, Position
+from autotrader.ipc import SharedState
+
+
+class StubProvider:
+    """In-memory provider whose latest_price changes without a real broker."""
+
+    def __init__(self):
+        self.prices = {}
+
+    def latest_price(self, ticker):
+        return self.prices.get(ticker)
+
+    def latest_prices(self, tickers):
+        return {ticker: self.prices.get(ticker) for ticker in tickers}
+
+    def bars(self, ticker, history_range=None):
+        return []
+
+    def news(self, ticker, limit=2):
+        return []
+
+
+def test_publish_pnl_attribution_is_independent_of_scan_cadence():
+    """A: publish_pnl_attribution can run on its own fast timer (independent of the 60s
+    scan), so the app's 5s poll gets near-real-time position prices + P&L."""
+    provider = StubProvider()
+    provider.prices["NVDA"] = 104.5
+    shared = SharedState()
+    shared.equity = Equity(equity=100_000.0, day_start_equity=100_000.0, peak_equity=100_000.0, day="2026-09-09")
+    positions = [Position(ticker="NVDA", qty=10, avg_entry_price=100.0)]
+    shared.positions = positions
+
+    publish_pnl_attribution(shared, provider, shared.equity, positions, [])
+
+    assert shared.pnl_attribution is not None
+    opens = shared.pnl_attribution["open_positions"]
+    assert opens[0]["ticker"] == "NVDA"
+    assert opens[0]["current_price"] == 104.5
+    assert opens[0]["unrealized_pnl"] == 45.0
+
+
+def test_refresh_live_prices_updates_in_place_via_batch():
+    """The fast 5s publisher refreshes current_price/unrealized in place from a batched
+    latest_prices call, without replacing position records (no write-ordering race)."""
+    provider = StubProvider()
+    provider.prices = {"NVDA": 101.0}
+    shared = SharedState()
+    shared.equity = Equity(equity=100_000.0, day_start_equity=100_000.0, peak_equity=100_000.0, day="2026-09-09")
+    shared.pnl_attribution = {
+        "open_positions": [
+            {"ticker": "NVDA", "qty": 10.0, "avg_entry_price": 100.0, "current_price": 100.0, "unrealized_pnl": 0.0},
+        ],
+    }
+    original_record = shared.pnl_attribution["open_positions"][0]
+
+    from autotrader.main import refresh_live_prices
+    refresh_live_prices(shared, provider)
+
+    assert shared.pnl_attribution["open_positions"][0] is original_record  # in place
+    assert original_record["current_price"] == 101.0
+    assert original_record["unrealized_pnl"] == 10.0
+
+
+def test_main_loop_day_change_engages_session_rollover():
+    """The main loop's day-change branch must roll the lifecycle into the freshly
+    observed session (unit-tested via the factored helper; main() itself loops forever)."""
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from autotrader.main import _handle_day_change
+
+    lifecycle_stub = Mock()
+    provider = Mock()
+    provider.gainers.return_value = []
+    shared = SharedState()
+    shared.equity_history = [{"t": 1.0, "equity": 1.0}]
+    cfg = SimpleNamespace(universe_size=5, min_price=1.0, min_volume=0)
+    universe = ["OLD"]
+
+    _handle_day_change(
+        "2026-09-03",
+        lifecycle=lifecycle_stub,
+        shared=shared,
+        provider=provider,
+        cfg=cfg,
+        universe=universe,
+    )
+
+    lifecycle_stub._ensure_rollover.assert_called_once_with("2026-09-03")
+    assert shared.equity_history == []
+    assert universe == []
+
+
+def test_parse_args_recover_flag():
+    args = _parse_args(["--recover"])
+    assert args.recover is True
+
+
+def test_parse_args_default_recover_false():
+    args = _parse_args([])
+    assert args.recover is False
+
+
+from copy import deepcopy
+from datetime import datetime, timezone
+
+from autotrader.lifecycle import EngineLifecycle
+from autotrader.models import AccountSnapshot, PositionsSnapshot, RiskState
+from autotrader.risk import RiskManager
+from autotrader.runner import Runner
+from autotrader.state import State
+
+
+_RECOVER_NOW = datetime(2026, 9, 2, 14, 30, tzinfo=timezone.utc)
+
+
+class _RecoverConfig:
+    alpaca_paper = True
+    paper_capital = 100_000.0
+    max_position_pct = 0.0025
+    max_gross_exposure_pct = 0.0025
+    max_positions = 1
+    max_entries_per_session = 1
+    max_snapshot_age_seconds = 120
+    kill_switch_pct = 0.10
+    daily_loss_pct = 0.05
+    flatten_at_close = True
+    flatten_time = "15:55"
+    stop_loss_pct = 0.02
+    take_profit_pct = 0.03
+    entry_threshold = 2.0
+    signal_weights = {"momentum": 1.0}
+
+
+class _RecoverStore:
+    def __init__(self, loaded):
+        self.loaded = loaded
+        self.saved = []
+
+    def load(self):
+        return deepcopy(self.loaded)
+
+    def save(self, state):
+        self.saved.append(deepcopy(state))
+
+    def save_or_raise(self, state):
+        self.saved.append(deepcopy(state))
+
+
+class _RecoverExecutor:
+    def __init__(self, positions=None, orders=None, equity=100_000.0):
+        self.positions_value = positions or []
+        self.orders_value = orders or []
+        self.equity = equity
+
+    def account_snapshot(self, *, now=None):
+        return AccountSnapshot(self.equity, now or _RECOVER_NOW)
+
+    def positions_snapshot(self, *, now=None):
+        return PositionsSnapshot(deepcopy(self.positions_value), now or _RECOVER_NOW)
+
+    def open_orders(self, *, now=None):
+        return []
+
+
+def _recover_lifecycle(loaded, *, positions=None):
+    cfg = _RecoverConfig()
+    risk = RiskManager(cfg, clock=lambda: _RECOVER_NOW, session_id="2026-09-02")
+    executor = _RecoverExecutor(positions=positions)
+    store = _RecoverStore(loaded)
+    runner = Runner(None, None, executor, risk, cfg, state_store=store, clock=lambda: _RECOVER_NOW)
+    engine = EngineLifecycle(cfg, executor, risk, runner, store, clock=lambda: _RECOVER_NOW)
+    return engine, risk, runner, store
+
+
+def test_recovery_cli_refuses_persisted_hard_stop_with_orphan_position():
+    """--recover must NEVER clear a persisted HALT-class halt_reason.
+
+    Regression: the handler previously hydrated state with startup_reconcile(), whose
+    full reconcile downgrades a persisted HALTED + hard_stop to a RECOVERABLE
+    broker_reconciliation_required when a broker orphan exists, bypassing the guard and
+    clearing the true-safety halt. Drive the actual handler sequence via the helper so
+    the test fails on the pre-fix hydration and passes on the minimal _restore_state()
+    hydration."""
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        risk_state=RiskState.HALTED,
+        halt_reason="hard_stop",
+        session_id="2026-09-02",
+    )
+    engine, risk, runner, store = _recover_lifecycle(loaded, positions=[Position("AAPL", 4, 100.0)])
+
+    result = run_recovery_cli(engine, store, runner)
+
+    assert result == 1
+    assert risk.halt_reason == "hard_stop"
+    assert risk.state is RiskState.HALTED
+    assert store.saved == []

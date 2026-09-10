@@ -73,10 +73,23 @@ struct Decision: Codable {
     let confidence: Double
 }
 
+struct ClosedTrade: Codable, Identifiable {
+    let ticker: String
+    let qty: Double
+    let entry_price: Double
+    let exit_price: Double
+    let realized_pnl: Double
+    let exit_reason: String
+    let closed_at: String
+
+    var id: String { "\(ticker)-\(closed_at)" }
+}
+
 struct EngineStatus: Codable {
     let equity: Equity?
     let positions: [Position]
     let decisions: [Decision]
+    let closed_trades: [ClosedTrade]
     let equity_history: [EquityPoint]
     let kill_switch: Bool
     let daily_stop: Bool
@@ -86,6 +99,7 @@ struct EngineStatus: Codable {
         equity = try c.decodeIfPresent(Equity.self, forKey: .equity)
         positions = try c.decodeIfPresent([Position].self, forKey: .positions) ?? []
         decisions = try c.decodeIfPresent([Decision].self, forKey: .decisions) ?? []
+        closed_trades = try c.decodeIfPresent([ClosedTrade].self, forKey: .closed_trades) ?? []
         equity_history = try c.decodeIfPresent([EquityPoint].self, forKey: .equity_history) ?? []
         kill_switch = try c.decodeIfPresent(Bool.self, forKey: .kill_switch) ?? false
         daily_stop = try c.decodeIfPresent(Bool.self, forKey: .daily_stop) ?? false
@@ -93,7 +107,7 @@ struct EngineStatus: Codable {
 
     enum CodingKeys: String, CodingKey {
         case equity, positions, decisions
-        case equity_history, kill_switch, daily_stop
+        case closed_trades, equity_history, kill_switch, daily_stop
     }
 }
 

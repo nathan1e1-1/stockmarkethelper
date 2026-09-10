@@ -11,8 +11,9 @@ import inspect
 import math
 from datetime import datetime, time, timezone
 
+from autotrader.halt import HaltClass, classify_halt
 from autotrader.market import EASTERN
-from autotrader.models import Equity, Position, RiskState, Side
+from autotrader.models import Equity, RiskState, Side
 
 
 _TERMINAL = frozenset({"filled", "cancelled", "canceled", "rejected", "expired"})
@@ -55,7 +56,56 @@ class EngineLifecycle:
         if not self._restored:
             self._restore_state()
             self._restored = True
+        now = self._now()
+        # Recover a restored non-ACTIVE state from broker truth before reconciling, so a
+        # recoverable halt (e.g. broker_reconciliation_required) is resolved by adopting
+        # the broker's real book. A genuine safety halt is never auto-recovered, and a
+        # prior-session state still awaiting an explicit local rearm is left untouched.
+        if self.risk.state is not RiskState.ACTIVE and self._recovery_permitted() and not self._genuine_halt_latched():
+            positions = self._positions_snapshot(now)
+            orders = self._open_orders(now)
+            if positions is not None and orders is not None:
+                self._recover_from_broker(positions, orders, now)
         return self._reconcile_and_cleanup() and self._account_valid and not self._requires_rearm
+
+    def _ensure_rollover(self, day: str) -> None:
+        """Roll a long-lived process into a fresh session from broker truth.
+
+        Called when the observed calendar day changes. Recovering with the new session
+        id resets session-scoped counters (RiskManager.recover's new-session branch) so
+        the new session starts clean instead of serving yesterday's state. A prior
+        session still awaiting an explicit local rearm and a genuine safety halt are
+        never auto-rolled.
+        """
+        if self._requires_rearm:
+            return
+        if self._genuine_halt_latched():
+            return
+        now = self._now()
+        if self._session_id(now) != day:
+            return
+        if self.risk.session_id == day:
+            return
+        # Only a fresh broker snapshot can unblock a rollover. A failed read must abort
+        # BEFORE recovery, never become an empty book that drops live positions.
+        positions = self._positions_snapshot(now)
+        orders = self._open_orders(now)
+        if positions is None or orders is None:
+            return
+        # Fetch the account snapshot before committing recovery so a failed account read
+        # leaves the pre-rollover session state untouched (no half-rolled session).
+        account = self._account_snapshot(now)
+        if account is None:
+            return
+        if not self._recover_from_broker(positions, orders, now):
+            return
+        # A new session re-baselines its stop levels (daily_stop/hard_stop) from a
+        # fresh broker account snapshot, exactly like a cold startup would.
+        self.risk.day_start_equity = account.equity
+        self.risk.peak_equity = account.equity
+        self.runner.equity = Equity(
+            account.equity, account.equity, account.equity, self._session_id(now)
+        )
 
     def tick(self, now: datetime, universe: list[str]) -> bool:
         """Perform a single safe cycle; entries are last and only after reconciliation."""
@@ -68,6 +118,10 @@ class EngineLifecycle:
         if self._at_cutoff(now):
             self.risk.latch_cutoff()
             self._begin_halt("session_cutoff")
+            # The cutoff stops entries for the day; it must not also suppress the
+            # end-of-day flatten. Run the one exit pass with the configured flatten time.
+            self.runner.manage_exits(flatten_time=self._configured_flatten_time(), now=now)
+            return False
         if not self._reconcile_and_cleanup():
             return False
         if not self.can_scan:
@@ -75,13 +129,18 @@ class EngineLifecycle:
         snapshot = self._account_snapshot(now)
         if snapshot is None:
             self._account_valid = False
-            self._begin_halt("invalid_account_snapshot")
+            if not self._genuine_halt_latched():
+                self._begin_halt("invalid_account_snapshot")
             return False
         self._account_valid = True
         equity = snapshot.equity
         self.risk.peak_equity = max(self.risk.peak_equity, equity)
         self.runner.equity = Equity(equity, self.risk.day_start_equity, self.risk.peak_equity, self._session_id(now))
-        if self.risk.hard_stop_triggered(equity) or self.risk.daily_stop_triggered(equity):
+        if self.risk.hard_stop_triggered(equity):
+            self._persist_or_halt("halt_persistence_failure")
+            self._reconcile_and_cleanup()
+            return False
+        if getattr(self.cfg, "risk_profile", "initial") != "multi-entry" and self.risk.daily_stop_triggered(equity):
             self._persist_or_halt("halt_persistence_failure")
             self._reconcile_and_cleanup()
             return False
@@ -127,23 +186,40 @@ class EngineLifecycle:
             session_id=loaded.session_id or self._session_id(self._now()),
             session_entry_count=loaded.session_entry_count,
             cutoff_latched=loaded.cutoff_latched,
+            daily_realized_loss_pct=loaded.daily_realized_loss_pct,
         ):
             self.risk.begin_halt("invalid_persisted_risk_state")
         snapshot = self._account_snapshot(self._now())
         if snapshot is None:
             self._account_valid = False
-            self.risk.begin_halt("invalid_account_snapshot")
+            if not self._genuine_halt_latched():
+                self.risk.begin_halt("invalid_account_snapshot")
             return
         self._account_valid = True
-        self.risk.day_start_equity = snapshot.equity
-        self.risk.peak_equity = snapshot.equity
-        self.runner.equity = Equity(
-            snapshot.equity,
-            snapshot.equity,
-            snapshot.equity,
-            self._session_id(self._now()),
-        )
-        if self.risk.state is RiskState.ACTIVE and self.risk.session_id != self._session_id(self._now()):
+        session = self._session_id(self._now())
+        same_session = loaded.equity is not None and loaded.equity.day == session
+        if same_session:
+            # Same-session restart: preserve the persisted day-start baseline and peak so
+            # day P&L accounting survives a mid-day engine restart. Only the live equity is
+            # refreshed from the broker snapshot.
+            persisted_baseline = loaded.equity.day_start_equity
+            persisted_peak = max(loaded.equity.peak_equity, snapshot.equity)
+            live_equity = snapshot.equity
+            self.risk.day_start_equity = persisted_baseline
+            self.risk.peak_equity = persisted_peak
+            self.runner.equity = Equity(live_equity, persisted_baseline, persisted_peak, session)
+        else:
+            # Fresh session (or no persisted equity): the broker's open equity is the
+            # authoritative new day-start baseline.
+            self.risk.day_start_equity = snapshot.equity
+            self.risk.peak_equity = snapshot.equity
+            self.runner.equity = Equity(
+                snapshot.equity,
+                snapshot.equity,
+                snapshot.equity,
+                session,
+            )
+        if self.risk.state is RiskState.ACTIVE and self.risk.session_id != session:
             self._requires_rearm = True
             self.risk.begin_halt("prior_session_requires_rearm")
 
@@ -156,24 +232,39 @@ class EngineLifecycle:
         positions = self._positions_snapshot(now)
         orders = self._open_orders(now)
         if positions is None or orders is None:
-            self._begin_halt("invalid_broker_snapshot")
+            if not self._genuine_halt_latched():
+                self._begin_halt("invalid_broker_snapshot")
             return False
+
+        # A genuine integrity halt (kill switch, daily stop) must survive the whole
+        # reconcile. RiskManager.begin_halt overwrites halt_reason unconditionally, so
+        # capture it before a broker divergence can latch a recoverable reason over it.
+        # State-independent: recovery must never clear a HALT-class halt_reason for any
+        # non-ACTIVE state (including RECOVERING).
+        safety_halt_latched = self._genuine_halt_latched()
 
         local_orders = {order.id: order for order in self.runner.pending_orders}
         local_client_ids = {order.client_order_id for order in self.runner.pending_orders}
+        pending_buy_tickers = {order.ticker for order in self.runner.pending_orders if order.side is Side.BUY}
         orphan_orders = [order for order in orders if order.id not in local_orders and order.client_order_id not in local_client_ids]
         missing_local_orders = self._missing_local_orders()
         broker_by_ticker = {position.ticker: position for position in positions}
         local_by_ticker = {position.ticker: position for position in self.risk.positions}
-        orphan_positions = [position for ticker, position in broker_by_ticker.items() if not self._same_position(local_by_ticker.get(ticker), position)]
+        orphan_positions = [
+            position
+            for ticker, position in broker_by_ticker.items()
+            if ticker not in pending_buy_tickers and not self._same_position(local_by_ticker.get(ticker), position)
+        ]
         missing_broker_positions = [position for ticker, position in local_by_ticker.items() if not self._same_position(broker_by_ticker.get(ticker), position)]
 
         if orphan_orders or missing_local_orders or orphan_positions or missing_broker_positions:
-            self._begin_halt("broker_reconciliation_required")
-        if self.risk.state is RiskState.HALTING:
-            blocked_sells = self._adopt_orphan_sells(orphan_orders, positions)
-            self._cancel_open_entries(orders)
-            self._ensure_exits(positions, blocked_sells)
+            if not safety_halt_latched:
+                self._begin_halt("broker_reconciliation_required")
+        if self._recovery_permitted() and not safety_halt_latched:
+            # Regenerate local books from broker truth (adopt real positions, release
+            # ghosts, bind confirmed orders). Never submits a sell. If broker truth
+            # cannot be read, risk stays HALTING/RECOVERING and the next tick retries.
+            self._recover_from_broker(positions, orders, now)
 
         if not self.runner.reconcile_orders():
             self._broker_clean = False
@@ -183,7 +274,8 @@ class EngineLifecycle:
         positions = self._positions_snapshot(now)
         orders = self._open_orders(now)
         if positions is None or orders is None:
-            self._begin_halt("invalid_broker_snapshot")
+            if not self._genuine_halt_latched():
+                self._begin_halt("invalid_broker_snapshot")
             return False
         local_orders = {order.id: order for order in self.runner.pending_orders}
         local_client_ids = {order.client_order_id for order in self.runner.pending_orders}
@@ -211,7 +303,8 @@ class EngineLifecycle:
             self._persist_or_halt("halt_persistence_failure")
             self._broker_clean = self.risk.state is RiskState.HALTED
         elif unmatched_orders or position_mismatch:
-            self._begin_halt("broker_reconciliation_required")
+            if not safety_halt_latched:
+                self._begin_halt("broker_reconciliation_required")
         elif self.risk.state is RiskState.ACTIVE:
             self._broker_clean = reconciled
         else:
@@ -227,71 +320,89 @@ class EngineLifecycle:
                     found = self._call(self.executor.order, pending.id)
             except Exception:
                 return True
+            if pending.id == pending.client_order_id:
+                # Unbound intent: a client-ID lookup returning no record is an uncertain
+                # submission the runner holds for retry, never a missing broker order.
+                if found is None:
+                    continue
             if found is None or not self._fresh(getattr(found, "observed_at", None)):
                 return True
         return False
 
-    def _cancel_open_entries(self, orders) -> None:
-        for order in orders:
-            if order.side is Side.BUY:
-                try:
-                    self._call(self.executor.cancel, order.id)
-                except Exception:
-                    # Reconciliation is intentionally incomplete after a failed cancel.
-                    pass
+    def _genuine_halt_latched(self) -> bool:
+        """True when the current halt_reason is a fail-closed (HALT-class) reason.
 
-    def _adopt_orphan_sells(self, orphan_orders, broker_positions: list[Position]) -> set[str]:
-        """Track a valid broker-originated sell before attempting any cleanup exit.
-
-        An orphan sell is already reducing the broker position.  It must block
-        a duplicate local exit even when its fields are too unsafe to adopt;
-        a valid snapshot is persisted as a normal pending sell so fill deltas
-        can be reconciled through the runner.
+        State-independent, so a genuine safety halt is never downgraded by a
+        recoverable begin_halt at any lifecycle site, for any non-ACTIVE state.
         """
-        blocked_tickers: set[str] = set()
-        positions_by_ticker = {position.ticker: position for position in broker_positions}
-        pending_ids = {order.id for order in self.runner.pending_orders}
-        pending_sell_tickers = {order.ticker for order in self.runner.pending_orders if order.side is Side.SELL}
-        for order in orphan_orders:
-            if order.side is not Side.SELL or order.ticker not in positions_by_ticker:
-                continue
-            blocked_tickers.add(order.ticker)
-            position = positions_by_ticker[order.ticker]
-            if order.ticker in pending_sell_tickers or order.id in pending_ids:
-                continue
-            if not self._safe_orphan_sell(order, position):
-                continue
-            self.runner.pending_orders.append(order)
-            pending_ids.add(order.id)
-            pending_sell_tickers.add(order.ticker)
-            if not self.runner._persist():
-                self._begin_halt("orphan_sell_persistence_failure")
-        return blocked_tickers
+        reason = self.risk.halt_reason
+        return reason is not None and classify_halt(reason) is HaltClass.HALT
 
-    def _ensure_exits(self, broker_positions: list[Position], blocked_sells: set[str] | None = None) -> None:
-        pending_sell_tickers = {order.ticker for order in self.runner.pending_orders if order.side is Side.SELL}
-        pending_sell_tickers.update(blocked_sells or set())
-        known = {position.ticker: position for position in self.risk.positions}
-        for position in broker_positions:
-            if position.ticker not in known or not self._same_position(known[position.ticker], position):
-                self.risk.positions = [item for item in self.risk.positions if item.ticker != position.ticker] + [position]
-            if position.ticker not in pending_sell_tickers:
-                self.runner._close(position, 1.0, "orphan")
+    def _recovery_permitted(self) -> bool:
+        """Only broker-truth divergence is recoverable, never a true-safety halt.
 
-    @staticmethod
-    def _safe_orphan_sell(order, position: Position) -> bool:
-        return (
-            isinstance(getattr(order, "id", None), str)
-            and bool(order.id)
-            and isinstance(getattr(order, "client_order_id", None), str)
-            and bool(order.client_order_id)
-            and order.side is Side.SELL
-            and order.ticker == position.ticker
-            and EngineLifecycle._positive(getattr(order, "qty", None))
-            and order.qty <= position.qty
-            and isinstance(getattr(order, "status", None), str)
-            and EngineLifecycle._aware(getattr(order, "observed_at", None))
+        A restored HALTING/RECOVERING state is reconciled from the broker unless it
+        is a fail-closed halt (kill switch, daily stop, cutoff) or the next session
+        still requires an explicit local rearm.
+        """
+        if self._requires_rearm:
+            return False
+        if self.risk.state in (RiskState.HALTING, RiskState.RECOVERING):
+            reason = self.risk.halt_reason
+            return reason is None or classify_halt(reason) is HaltClass.RECOVERABLE
+        return False
+
+    def _recover_from_broker(self, broker_positions, broker_orders, now) -> bool:
+        """Reconcile from broker truth. Never sells.
+
+        A local pending order can be terminal at the broker (filled/cancelled/rejected)
+        between ticks, so it is absent from the open-order snapshot. This routine first
+        BOOKS every broker-confirmed terminal fill through the runner's monotonic
+        reconcile machinery, and only then lets risk.recover adopt broker positions,
+        release true ghosts, and bind still-open orders. Booking before pruning is what
+        preserves realized P&L and the daily-loss gate. No order is ever submitted here.
+        """
+        confirmed_client_ids = [getattr(order, "client_order_id", None) for order in broker_orders]
+        confirmed_client_ids = [cid for cid in confirmed_client_ids if isinstance(cid, str)]
+        confirmed = set(confirmed_client_ids)
+
+        # A local intent is a true ghost only when the broker has no record of it at all
+        # (neither open nor terminal). Drop only those, so that a terminal-but-unfilled
+        # order still survives to be booked below and an open order stays bound.
+        self.runner.pending_orders = [
+            pending for pending in self.runner.pending_orders if self._broker_order_record(pending) is not None
+        ]
+
+        # Book broker-confirmed terminal fills and bind live orders BEFORE risk.recover
+        # overwrites the local books with broker truth. This path only reports what the
+        # broker already confirmed; it never submits an order.
+        if not self.runner.reconcile_orders():
+            return False
+
+        ok = self.risk.recover(
+            positions=list(broker_positions),
+            confirmed_client_ids=confirmed_client_ids,
+            session_id=self._session_id(now),
         )
+        if not ok:
+            return False
+        self.runner.pending_orders = [o for o in self.runner.pending_orders if o.client_order_id in confirmed]
+        self._broker_clean = True
+        return self._persist_or_halt("recover_persistence_failure")
+
+    def _broker_order_record(self, pending):
+        """The broker's record for a local intent, or None when the broker has none.
+
+        Looks up by client order ID while the intent is unbound and by broker order ID
+        once acknowledged. Unlike open_orders(), a terminal record is returned as well,
+        so a broker-confirmed fill is never mistaken for a ghost.
+        """
+        try:
+            if pending.id == pending.client_order_id:
+                return self._call(self.executor.order_by_client_id, pending.client_order_id)
+            return self._call(self.executor.order, pending.id)
+        except Exception:
+            return None
 
     def _begin_halt(self, reason: str) -> None:
         self.risk.begin_halt(reason)
@@ -342,12 +453,18 @@ class EngineLifecycle:
     def _at_cutoff(self, now: datetime) -> bool:
         if not getattr(self.cfg, "flatten_at_close", False):
             return False
-        try:
-            cutoff = time.fromisoformat(self.cfg.flatten_time)
-            return now.astimezone(EASTERN).time() >= cutoff
-        except (AttributeError, TypeError, ValueError):
+        cutoff = self._configured_flatten_time()
+        if cutoff is None:
             self._begin_halt("invalid_flatten_time")
             return True
+        return now.astimezone(EASTERN).time() >= cutoff
+
+    def _configured_flatten_time(self) -> time | None:
+        """Parse the configured flatten time into a `time`, or None when unusable."""
+        try:
+            return time.fromisoformat(self.cfg.flatten_time)
+        except (AttributeError, TypeError, ValueError):
+            return None
 
     def _session_id(self, now: datetime) -> str:
         return now.date().isoformat()

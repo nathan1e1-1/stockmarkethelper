@@ -1,3 +1,4 @@
+import sys
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from math import inf, nan
@@ -747,4 +748,312 @@ def test_rearm_refuses_clock_exception_without_reviving_halted_state(now):
 
     assert risk.can_rearm("2026-09-02", clean_reconciliation=True) is False
     assert risk.rearm("2026-09-02", clean_reconciliation=True) is False
-    assert risk.state is RiskState.HALTED
+
+
+@dataclass
+class MultiEntryPaperCfg(InitialPaperCfg):
+    max_position_pct: float = 0.05
+    max_gross_exposure_pct: float = 0.05
+    max_positions: int = 5
+    max_entries_per_session: int = sys.maxsize
+    kill_switch_pct: float = 0.25
+    risk_per_position_pct: float | None = 0.01
+    max_daily_risk_pct: float | None = 0.05
+    stop_loss_pct: float = 0.05
+    take_profit_pct: float = 0.05
+
+
+@pytest.fixture
+def multi_risk(now):
+    return RiskManager(MultiEntryPaperCfg(), clock=lambda: now, session_id="2026-09-01")
+
+
+def test_risk_based_position_size_uses_shared_stop_distance(now):
+    rm = RiskManager(MultiEntryPaperCfg(), clock=lambda: now, session_id="2026-09-01")
+
+    assert rm.position_size("AAPL", price=100.0, equity=100_000.0) == 200  # 1% risk / 5% stop -> 20k budget
+    assert rm.position_size("AAPL", price=200.0, equity=100_000.0) == 100
+
+
+def test_risk_based_sizing_returns_zero_for_zero_or_nonpositive_inputs(multi_risk):
+    assert multi_risk.position_size("AAPL", price=0, equity=100_000.0) == 0
+    assert multi_risk.position_size("AAPL", price=100.0, equity=0) == 0
+
+
+def test_multi_entry_accepts_five_concurrent_slots_and_then_blocks(multi_risk, now):
+    for ticker in ("A", "B", "C", "D", "E"):
+        admission = multi_risk.reserve_entry(ticker, 20, 100.0, 100_000.0, now)
+        assert admission.accepted, admission.reason
+    blocked = multi_risk.reserve_entry("F", 20, 100.0, 100_000.0, now)
+    assert blocked.accepted is False
+    assert blocked.reason == "max_positions"
+
+
+def test_multi_entry_notional_cap_tracks_risk_budget(multi_risk, now):
+    budget = 100_000.0 * 0.01 / 0.05  # 20_000
+    over = multi_risk.reserve_entry("AAPL", 201, 100.0, 100_000.0, now)
+    assert over.accepted is False
+    assert over.reason == "max_position_exposure"
+    ok = multi_risk.reserve_entry("AAPL", 200, 100.0, 100_000.0, now)
+    assert ok.accepted
+    assert ok.reservation.qty == 200.0
+
+
+def test_realized_loss_accumulates_and_gate_blocks_new_entries(multi_risk, now):
+    multi_risk.record_realized_loss(1_000.0)  # 1% of 100k day_start
+    assert multi_risk.daily_realized_loss_pct == pytest.approx(0.01)
+    assert multi_risk.reserve_entry("AAPL", 20, 100.0, 100_000.0, now).accepted
+
+    multi_risk.record_realized_loss(4_000.0)  # 5% total
+    blocked = multi_risk.reserve_entry("MSFT", 20, 100.0, 100_000.0, now)
+    assert blocked.accepted is False
+    assert blocked.reason == "max_daily_risk_pct"
+
+
+def test_realized_loss_gate_does_not_apply_to_initial_profile(now, risk):
+    risk.record_realized_loss(99_000.0)
+    blocked = risk.reserve_entry("AAPL", 1, 100.0, 100_000.0, now)
+    assert blocked.reason != "max_daily_risk_pct"
+
+
+def test_record_realized_loss_rejects_invalid_values(multi_risk, now):
+    assert multi_risk.record_realized_loss(-1.0) is False
+    assert multi_risk.record_realized_loss(float("nan")) is False
+    assert multi_risk.state is RiskState.HALTING
+
+
+def test_restore_persists_and_validates_daily_realized_loss(now):
+    restored = RiskManager(MultiEntryPaperCfg(), clock=lambda: now, session_id="2026-09-01")
+    assert restored.restore_persisted_safety_state(
+        positions=[], reservations=[], pending_orders=[], risk_state=RiskState.ACTIVE,
+        halt_reason=None, session_id="2026-09-01", session_entry_count=0,
+        cutoff_latched=False, daily_realized_loss_pct=0.03,
+    ) is True
+    assert restored.daily_realized_loss_pct == 0.03
+    assert restored.reserve_entry("AAPL", 20, 100.0, 100_000.0, now).accepted
+
+    bad = RiskManager(MultiEntryPaperCfg(), clock=lambda: now, session_id="2026-09-01")
+    assert bad.restore_persisted_safety_state(
+        positions=[], reservations=[], pending_orders=[], risk_state=RiskState.ACTIVE,
+        halt_reason=None, session_id="2026-09-01", session_entry_count=0,
+        cutoff_latched=False, daily_realized_loss_pct=-0.01,
+    ) is False
+
+
+def test_rearm_clears_daily_realized_loss(now):
+    clock = [now + timedelta(days=1)]
+    rm = RiskManager(MultiEntryPaperCfg(), clock=lambda: clock[0], session_id="2026-09-01")
+    rm.record_realized_loss(5_000.0)
+    rm.begin_halt("daily_stop")
+    assert rm.complete_halt(clean_reconciliation=True) is True
+    assert rm.rearm("2026-09-02", clean_reconciliation=True) is True
+    assert rm.daily_realized_loss_pct == 0.0
+
+
+def test_can_enter_honors_daily_risk_gate(multi_risk):
+    assert multi_risk.can_enter("AAPL") is True
+    multi_risk.record_realized_loss(5_000.0)  # 5% -> gate tripped
+    assert multi_risk.can_enter("AAPL") is False
+
+
+def test_restore_of_tripped_accumulator_blocks_new_entries(now):
+    restored = RiskManager(MultiEntryPaperCfg(), clock=lambda: now, session_id="2026-09-01")
+    assert restored.restore_persisted_safety_state(
+        positions=[], reservations=[], pending_orders=[], risk_state=RiskState.ACTIVE,
+        halt_reason=None, session_id="2026-09-01", session_entry_count=0,
+        cutoff_latched=False, daily_realized_loss_pct=0.05,
+    ) is True
+    assert restored.daily_realized_loss_pct == 0.05
+    blocked = restored.reserve_entry("AAPL", 20, 100.0, 100_000.0, now)
+    assert blocked.accepted is False
+    assert blocked.reason == "max_daily_risk_pct"
+
+
+@pytest.mark.parametrize("bad_loss", [float("nan"), float("inf"), True, -0.01])
+def test_restore_rejects_nonfinite_bool_or_negative_daily_realized_loss(now, bad_loss):
+    restored = RiskManager(MultiEntryPaperCfg(), clock=lambda: now, session_id="2026-09-01")
+    assert restored.restore_persisted_safety_state(
+        positions=[], reservations=[], pending_orders=[], risk_state=RiskState.ACTIVE,
+        halt_reason=None, session_id="2026-09-01", session_entry_count=0,
+        cutoff_latched=False, daily_realized_loss_pct=bad_loss,
+    ) is False
+
+
+@dataclass
+class ZeroStopMultiEntryCfg(MultiEntryPaperCfg):
+    stop_loss_pct: float = 0.0
+
+
+@pytest.fixture
+def zero_stop_multi_risk(now):
+    return RiskManager(ZeroStopMultiEntryCfg(), clock=lambda: now, session_id="2026-09-01")
+
+
+def test_nonpositive_stop_loss_pct_denies_position_size_without_throwing(zero_stop_multi_risk):
+    assert zero_stop_multi_risk.position_size("AAPL", price=100.0, equity=100_000.0) == 0
+
+
+def test_nonpositive_stop_loss_pct_denies_reserve_entry_without_throwing(zero_stop_multi_risk, now):
+    admission = zero_stop_multi_risk.reserve_entry("AAPL", 20, 100.0, 100_000.0, now)
+    assert admission.accepted is False
+    assert admission.reason == "invalid_input"
+
+
+def test_recover_transitions_to_active_and_adopts_positions(now):
+    rm = RiskManager(InitialPaperCfg(), clock=lambda: now, session_id="2026-09-01")
+    rm.begin_halt("broker_reconciliation_required")
+
+    ok = rm.recover(
+        positions=[Position(ticker="AAPL", qty=4, avg_entry_price=100.0)],
+        confirmed_client_ids=[],
+        session_id="2026-09-01",
+    )
+
+    assert ok is True
+    assert rm.state is RiskState.ACTIVE
+    assert rm.halt_reason is None
+    assert [(p.ticker, p.qty) for p in rm.positions] == [("AAPL", 4)]
+
+
+def test_recover_releases_ghost_reservation_without_broker_confirmation(now):
+    rm = RiskManager(InitialPaperCfg(), clock=lambda: now, session_id="2026-09-01")
+    admission = rm.reserve_entry("AAPL", 2, 100.0, 100_000.0, now)
+    assert admission.accepted
+    rm.bind_acknowledgement(admission.reservation.client_order_id, "broker-1")
+    rm.begin_halt("broker_reconciliation_required")
+
+    ok = rm.recover(
+        positions=[],
+        confirmed_client_ids=[],
+        session_id="2026-09-01",
+    )
+
+    assert ok is True
+    assert rm.state is RiskState.ACTIVE
+    assert rm.reservations == {}
+    assert rm._pending_entries == {}
+
+
+def test_recover_keeps_broker_confirmed_intent_bound(now):
+    rm = RiskManager(InitialPaperCfg(), clock=lambda: now, session_id="2026-09-01")
+    admission = rm.reserve_entry("AAPL", 2, 100.0, 100_000.0, now)
+    rm.bind_acknowledgement(admission.reservation.client_order_id, "broker-1")
+    rm.begin_halt("broker_reconciliation_required")
+
+    ok = rm.recover(
+        positions=[],
+        confirmed_client_ids=[admission.reservation.client_order_id],
+        session_id="2026-09-01",
+    )
+
+    assert ok is True
+    assert rm.state is RiskState.ACTIVE
+    assert rm.reservations.get(admission.reservation.client_order_id) is not None
+
+
+def test_recover_never_creates_sell_intents(now):
+    rm = RiskManager(InitialPaperCfg(), clock=lambda: now, session_id="2026-09-01")
+    rm.positions = [Position(ticker="AAPL", qty=4, avg_entry_price=100.0)]
+    rm.begin_halt("broker_reconciliation_required")
+
+    ok = rm.recover(
+        positions=[Position(ticker="AAPL", qty=4, avg_entry_price=100.0)],
+        confirmed_client_ids=[],
+        session_id="2026-09-01",
+    )
+
+    assert ok is True
+    assert rm.state is RiskState.ACTIVE
+    assert len(rm.positions) == 1
+
+
+def test_recover_rejects_invalid_positions_or_session(now):
+    rm = RiskManager(InitialPaperCfg(), clock=lambda: now, session_id="2026-09-01")
+    rm.begin_halt("broker_reconciliation_required")
+
+    assert rm.recover(positions=[], confirmed_client_ids=[], session_id="not-a-session") is False
+    assert rm.recover(
+        positions=[Position(ticker="AAPL", qty=0, avg_entry_price=100.0)],
+        confirmed_client_ids=[], session_id="2026-09-01",
+    ) is False
+    assert rm.recover(
+        positions=[Position(ticker="A", qty=1, avg_entry_price=1.0), Position(ticker="A", qty=2, avg_entry_price=2.0)],
+        confirmed_client_ids=[], session_id="2026-09-01",
+    ) is False
+
+
+def test_recover_is_noop_when_already_active(now):
+    rm = RiskManager(InitialPaperCfg(), clock=lambda: now, session_id="2026-09-01")
+    assert rm.state is RiskState.ACTIVE
+    assert rm.recover(positions=[], confirmed_client_ids=[], session_id="2026-09-01") is True
+
+
+def test_recover_releases_unacknowledged_ghost_reservation(now):
+    """An entry essayed but never acknowledged (submit raised) must NOT survive
+    recovery as a slot-blocking ghost."""
+    rm = RiskManager(InitialPaperCfg(), clock=lambda: now, session_id="2026-09-01")
+    admission = rm.reserve_entry("AAPL", 2, 100.0, 100_000.0, now)
+    assert admission.accepted
+    rm.begin_halt("broker_reconciliation_required")
+
+    ok = rm.recover(positions=[], confirmed_client_ids=[], session_id="2026-09-01")
+
+    assert ok is True
+    assert rm.reservations == {}
+    assert rm.state is RiskState.ACTIVE
+
+
+def test_recover_refunds_session_entry_slot_for_released_ghost(now):
+    rm = RiskManager(InitialPaperCfg(), clock=lambda: now, session_id="2026-09-01")
+    admission = rm.reserve_entry("AAPL", 2, 100.0, 100_000.0, now)
+    rm.bind_acknowledgement(admission.reservation.client_order_id, "broker-1")
+    rm.begin_halt("broker_reconciliation_required")
+
+    ok = rm.recover(positions=[], confirmed_client_ids=[], session_id="2026-09-01")
+
+    assert ok is True
+    assert rm.session_entry_count == 0
+    assert rm.reserve_entry("MSFT", 1, 100.0, 100_000.0, now).accepted
+
+
+def test_recover_resets_session_counters_on_cross_session(now):
+    rm = RiskManager(InitialPaperCfg(), clock=lambda: now, session_id="2026-09-01")
+    admission = rm.reserve_entry("AAPL", 2, 100.0, 100_000.0, now)
+    rm.bind_acknowledgement(admission.reservation.client_order_id, "broker-1")
+    rm.session_entry_count = 7
+    rm.cutoff_latched = True
+    rm.daily_realized_loss_pct = 0.03
+    rm.begin_halt("broker_reconciliation_required")
+
+    ok = rm.recover(
+        positions=[],
+        confirmed_client_ids=[admission.reservation.client_order_id],
+        session_id="2026-09-02",
+    )
+
+    assert ok is True
+    assert rm.session_id == "2026-09-02"
+    assert rm.session_entry_count == 0
+    assert rm.cutoff_latched is False
+    assert rm.daily_realized_loss_pct == 0.0
+    assert rm.reservations.get(admission.reservation.client_order_id) is not None
+
+
+def test_recover_rejects_malformed_inputs_fail_closed(now):
+    rm = RiskManager(InitialPaperCfg(), clock=lambda: now, session_id="2026-09-01")
+    rm.begin_halt("broker_reconciliation_required")
+    assert rm.recover(positions=None, confirmed_client_ids=[], session_id="2026-09-01") is False
+    assert rm.recover(positions=[], confirmed_client_ids=None, session_id="2026-09-01") is False
+    assert rm.state is not RiskState.ACTIVE
+
+
+def test_recover_rejects_malformed_confirmed_client_elements(now):
+    rm = RiskManager(InitialPaperCfg(), clock=lambda: now, session_id="2026-09-01")
+    rm.begin_halt("broker_reconciliation_required")
+    assert rm.recover(
+        positions=[], confirmed_client_ids=[["not-a-str"]], session_id="2026-09-01"
+    ) is False
+    assert rm.recover(
+        positions=[], confirmed_client_ids=[1], session_id="2026-09-01"
+    ) is False
+    assert rm.state is not RiskState.ACTIVE

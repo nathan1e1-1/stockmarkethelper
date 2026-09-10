@@ -12,8 +12,9 @@ from autotrader.ipc import (
     create_app,
     SharedState,
 )
-from autotrader.models import AgentDecision, Decision, Equity, Position
+from autotrader.models import AgentDecision, ClosedTrade, Decision, Equity, Position, Reservation
 from autotrader.pnl_explanation import render_pnl_explanation_structured
+from autotrader.risk import RiskManager
 
 
 @pytest.fixture
@@ -40,6 +41,32 @@ def test_status_endpoint():
     body = r.json()
     assert body["equity"]["equity"] == 99000.0
     assert body["kill_switch"] is False
+
+
+def test_status_includes_closed_trades():
+    state = SharedState()
+    state.equity = Equity(equity=99000.0, day_start_equity=100000.0, peak_equity=100000.0, day="d")
+    state.closed_trades = [
+        ClosedTrade(
+            ticker="SPCX",
+            qty=2.0,
+            entry_price=145.67,
+            exit_price=146.04,
+            realized_pnl=0.74,
+            exit_reason="take_profit",
+        )
+    ]
+    client = TestClient(create_app(state))
+    r = client.get("/api/status")
+    assert r.status_code == 200
+    trades = r.json()["closed_trades"]
+    assert len(trades) == 1
+    assert trades[0]["ticker"] == "SPCX"
+    assert trades[0]["qty"] == 2.0
+    assert trades[0]["entry_price"] == 145.67
+    assert trades[0]["exit_price"] == 146.04
+    assert trades[0]["realized_pnl"] == 0.74
+    assert trades[0]["exit_reason"] == "take_profit"
 
 
 def test_status_includes_equity_history():
@@ -330,30 +357,34 @@ def test_chat_endpoint_returns_safe_retry_error_when_llm_missing():
     assert response.json()["detail"] == "Assistant is temporarily unavailable. Please try again shortly."
 
 
-def test_chat_endpoint_returns_safe_retry_error_when_llm_fails():
+def test_chat_endpoint_degrades_to_keyword_fallback_when_llm_fails():
     class FailingLLM:
         def complete(self, prompt):
             raise RuntimeError("connection refused")
 
-    client = TestClient(create_app(SharedState(), llm=FailingLLM()))
+    state = SharedState()
+    state.equity = Equity(equity=99_000.0, day_start_equity=100_000.0, peak_equity=101_000.0, day="2026-08-31")
+    client = TestClient(create_app(state, llm=FailingLLM()))
 
     response = client.post("/api/chat", json={"question": "How is the account?"})
 
-    assert response.status_code == 503
-    assert response.json()["detail"] == "Assistant is temporarily unavailable. Please try again shortly."
+    assert response.status_code == 200
+    assert "Day-start equity" in response.json()["answer"]
 
 
-def test_chat_endpoint_returns_safe_retry_error_for_ollama_unavailable_sentinel():
+def test_chat_endpoint_degrades_to_keyword_fallback_for_ollama_unavailable_sentinel():
     class SentinelLLM:
         def complete(self, prompt):
             return "Daily summary unavailable."
 
-    client = TestClient(create_app(SharedState(), llm=SentinelLLM()))
+    state = SharedState()
+    state.equity = Equity(equity=99_000.0, day_start_equity=100_000.0, peak_equity=101_000.0, day="2026-08-31")
+    client = TestClient(create_app(state, llm=SentinelLLM()))
 
     response = client.post("/api/chat", json={"question": "How is the account?"})
 
-    assert response.status_code == 503
-    assert response.json()["detail"] == "Assistant is temporarily unavailable. Please try again shortly."
+    assert response.status_code == 200
+    assert "Day-start equity" in response.json()["answer"]
 
 
 def test_chat_context_identifies_recorded_decision_source_and_timestamp(state_with_recorded_decision):
@@ -685,26 +716,29 @@ def test_chat_endpoint_renders_account_currency_day_start_and_current_equity():
     "raw_output",
     ["Short AAPL now.", "Set a trailing stop.", "The engine action was to reduce AAPL exposure."],
 )
-def test_chat_endpoint_rejects_non_json_model_prose(raw_output):
+def test_chat_endpoint_degrades_to_fallback_for_non_json_model_prose(raw_output):
     class UnsafeLLM:
         def complete(self, prompt):
             return raw_output
 
-    response = TestClient(create_app(SharedState(), llm=UnsafeLLM())).post("/api/chat", json={"question": "What happened?"})
-    assert response.status_code == 503
-    assert response.json()["detail"] == "Assistant is temporarily unavailable. Please try again shortly."
+    state = SharedState()
+    state.equity = Equity(equity=99_000.0, day_start_equity=100_000.0, peak_equity=101_000.0, day="2026-08-31")
+    response = TestClient(create_app(state, llm=UnsafeLLM())).post("/api/chat", json={"question": "What happened?"})
+    assert response.status_code == 200
+    assert "Day-start equity" in response.json()["answer"]
 
 
-def test_chat_endpoint_returns_503_when_selector_contains_unknown_topic():
+def test_chat_endpoint_degrades_to_fallback_when_selector_contains_unknown_topic():
     class FakeLLM:
         def complete(self, prompt):
             return '{"topics": ["unknown", "positions", "unknown"]}'
 
     state = SharedState()
+    state.equity = Equity(equity=99_000.0, day_start_equity=100_000.0, peak_equity=101_000.0, day="2026-08-31")
     state.positions = [Position(ticker="AAPL", qty=3, avg_entry_price=190.0)]
     response = TestClient(create_app(state, llm=FakeLLM())).post("/api/chat", json={"question": "Show positions"})
-    assert response.status_code == 503
-    assert response.json()["detail"] == "Assistant is temporarily unavailable. Please try again shortly."
+    assert response.status_code == 200
+    assert "Position AAPL" in response.json()["answer"]
 
 
 @pytest.mark.parametrize("selector", ['{"topics": []}', '{"topics": ["pnl"]}'])
@@ -730,14 +764,16 @@ def test_chat_endpoint_returns_safe_limitation_when_no_selected_topic_can_render
         '{"topics": ["pnl"], "unexpected": true}',
     ],
 )
-def test_chat_endpoint_returns_503_for_malformed_selector_json(selector):
+def test_chat_endpoint_degrades_to_fallback_for_malformed_selector_json(selector):
     class FakeLLM:
         def complete(self, prompt):
             return selector
 
-    response = TestClient(create_app(SharedState(), llm=FakeLLM())).post("/api/chat", json={"question": "How is the account?"})
-    assert response.status_code == 503
-    assert response.json()["detail"] == "Assistant is temporarily unavailable. Please try again shortly."
+    state = SharedState()
+    state.equity = Equity(equity=99_000.0, day_start_equity=100_000.0, peak_equity=101_000.0, day="2026-08-31")
+    response = TestClient(create_app(state, llm=FakeLLM())).post("/api/chat", json={"question": "How is the account?"})
+    assert response.status_code == 200
+    assert response.json()["disclaimer"] == _INFORMATIONAL_DISCLAIMER
 
 
 def test_chat_endpoint_renders_positions_only_from_ticker_quantity_and_average_entry():
@@ -964,3 +1000,155 @@ def test_structured_pnl_explanation_never_returns_raw_news():
 def test_render_pnl_explanation_structured_returns_none_without_pnl():
     assert render_pnl_explanation_structured({"daily_pnl": None, "realized_pnl": None, "unrealized_pnl": None}) is None
     assert render_pnl_explanation_structured({}) is None
+
+
+class StatusRiskCfg:
+    max_positions = 5
+    max_entries_per_session = 10**9
+    risk_per_position_pct = 0.01
+    max_daily_risk_pct = 0.05
+    stop_loss_pct = 0.05
+    take_profit_pct = 0.05
+    kill_switch_pct = 0.25
+    daily_loss_pct = 0.05
+    paper_capital = 100_000.0
+    max_position_pct = 0.05
+    max_gross_exposure_pct = 0.05
+    max_snapshot_age_seconds = 120
+
+
+def _status_risk():
+    return RiskManager(StatusRiskCfg(), clock=lambda: datetime.now(timezone.utc), session_id="2026-09-02")
+
+
+def test_status_exposes_daily_realized_loss_and_slots():
+    state = SharedState()
+    state.equity = Equity(equity=100_000.0, day_start_equity=100_000.0, peak_equity=100_000.0, day="d")
+    state.risk = _status_risk()
+    state.risk.record_realized_loss(2_000.0)
+    client = TestClient(create_app(state))
+    body = client.get("/api/status").json()
+    assert body["daily_realized_loss_pct"] == pytest.approx(0.02)
+    assert body["daily_risk_gate_tripped"] is False
+    assert body["open_slots"] == 5
+
+
+def test_status_reports_daily_risk_gate_tripped():
+    state = SharedState()
+    state.equity = Equity(equity=100_000.0, day_start_equity=100_000.0, peak_equity=100_000.0, day="d")
+    state.risk = _status_risk()
+    state.risk.record_realized_loss(5_000.0)
+    client = TestClient(create_app(state))
+    body = client.get("/api/status").json()
+    assert body["daily_risk_gate_tripped"] is True
+    assert body["open_slots"] == 5
+
+
+def test_status_open_slots_accounts_for_reserved_slots():
+    state = SharedState()
+    state.equity = Equity(equity=100_000.0, day_start_equity=100_000.0, peak_equity=100_000.0, day="d")
+    state.risk = _status_risk()
+    now_ts = datetime.now(timezone.utc)
+    reservation = Reservation("entry-c", "MSFT", 200.0, 100.0, now_ts)
+    state.risk.reservations[reservation.client_order_id] = reservation  # one slot taken
+    client = TestClient(create_app(state))
+    body = client.get("/api/status").json()
+    assert body["open_slots"] == 4
+
+
+def test_status_without_risk_reports_nulls():
+    state = SharedState()
+    state.equity = Equity(equity=100_000.0, day_start_equity=100_000.0, peak_equity=100_000.0, day="d")
+    client = TestClient(create_app(state))
+    body = client.get("/api/status").json()
+    assert body["daily_realized_loss_pct"] is None
+    assert body["daily_risk_gate_tripped"] is None
+    assert body["open_slots"] is None
+
+
+def test_status_positions_include_live_price_from_pnl_attribution():
+    """B: /api/status positions must carry live current_price / unrealized_pnl from the
+    fast-published pnl_attribution, so the 5s app poll reflects near-real-time prices
+    instead of only the 60s scan snapshot."""
+    from autotrader.models import Position
+
+    state = SharedState()
+    state.equity = Equity(equity=100_000.0, day_start_equity=100_000.0, peak_equity=100_000.0, day="d")
+    state.positions = [Position(ticker="NVDA", qty=10, avg_entry_price=100.0)]
+    state.pnl_attribution = {
+        "open_positions": [
+            {
+                "ticker": "NVDA",
+                "qty": 10.0,
+                "avg_entry_price": 100.0,
+                "current_price": 104.5,
+                "unrealized_pnl": 45.0,
+                "unrealized_pnl_pct": 4.5,
+            }
+        ],
+    }
+    client = TestClient(create_app(state))
+    body = client.get("/api/status").json()
+    pos = body["positions"][0]
+    assert pos["ticker"] == "NVDA"
+    assert pos["current_price"] == pytest.approx(104.5)
+    assert pos["unrealized_pnl"] == pytest.approx(45.0)
+
+
+def test_status_positions_default_to_no_live_price_when_attribution_missing():
+    from autotrader.models import Position
+
+    state = SharedState()
+    state.equity = Equity(equity=100_000.0, day_start_equity=100_000.0, peak_equity=100_000.0, day="d")
+    state.positions = [Position(ticker="NVDA", qty=10, avg_entry_price=100.0)]
+    client = TestClient(create_app(state))
+    body = client.get("/api/status").json()
+    pos = body["positions"][0]
+    assert pos["ticker"] == "NVDA"
+    assert pos.get("current_price") is None
+
+
+class ProseLLM:
+    """An LLM that answers the question instead of returning the selector schema —
+    the real-world llama3.2 behavior with format:json."""
+
+    def complete(self, prompt):
+        # Answers the question, not the selector instruction.
+        return '{"positions": [{"ticker": "NU", "qty": 1782}]}'
+
+
+def test_chat_falls_back_to_deterministic_topics_when_selector_malformed():
+    """Root-cause regression: llama3.2 with format:json sometimes returns the answer-object
+    (e.g. {"positions": [...]}) instead of {"topics": [...]}. The chat must NOT 503 as
+    'unavailable' — it should render the relevant safe topics from a keyword fallback."""
+    from autotrader.models import Position
+
+    state = SharedState()
+    state.equity = Equity(equity=99_000.0, day_start_equity=100_000.0, peak_equity=101_000.0, day="2026-08-31")
+    state.positions = [Position(ticker="NU", qty=1782, avg_entry_price=15.21)]
+    state.decisions = []
+
+    response = TestClient(create_app(state, llm=ProseLLM())).post(
+        "/api/chat", json={"question": "What positions are open?"}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "Position NU: quantity" in body["answer"]
+    assert body["disclaimer"] == _INFORMATIONAL_DISCLAIMER
+
+
+def test_chat_keyword_fallback_selects_pnl_for_pnl_question():
+    state = SharedState()
+    state.equity = Equity(equity=99_000.0, day_start_equity=100_000.0, peak_equity=101_000.0, day="2026-08-31")
+    state.pnl_attribution = {"daily_pnl": -1_000.0, "realized_pnl": -400.0, "unrealized_pnl": -600.0}
+    state.positions = []
+    state.decisions = []
+
+    response = TestClient(create_app(state, llm=ProseLLM())).post(
+        "/api/chat", json={"question": "What is driving today's P&L ?"}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "Daily P&L" in body["answer"]

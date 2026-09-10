@@ -7,7 +7,8 @@ struct PositionsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 positionsSection.entrance()
-                decisionsSection.entrance(delay: 0.08)
+                tradesSection.entrance(delay: 0.08)
+                decisionsSection.entrance(delay: 0.16)
             }
             .padding(24)
             .frame(maxWidth: 920, alignment: .leading)
@@ -74,6 +75,87 @@ struct PositionsView: View {
                 }
             }
         }
+    }
+
+    private var tradesSection: some View {
+        let trades = client.status?.closed_trades ?? []
+
+        return VStack(alignment: .leading, spacing: 12) {
+            SSectionLabel(text: "Closed trades")
+
+            if trades.isEmpty {
+                emptyState("No trades closed yet")
+            } else {
+                SCard {
+                    VStack(spacing: 0) {
+                        HStack {
+                            Text("Ticker").frame(maxWidth: .infinity, alignment: .leading)
+                            Text("Qty").frame(width: 80, alignment: .trailing)
+                            Text("Entry → Exit").frame(width: 170, alignment: .trailing)
+                            Text("P&L").frame(width: 90, alignment: .trailing)
+                        }
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.mutedForeground)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+
+                        Divider().overlay(Color.border)
+
+                        ForEach(trades) { t in
+                            VStack(spacing: 0) {
+                                HStack(alignment: .center, spacing: 12) {
+                                    Text(t.ticker)
+                                        .font(.body.weight(.semibold))
+                                        .foregroundStyle(Color.foreground)
+                                    exitReasonBadge(t.exit_reason)
+                                    Spacer(minLength: 0)
+                                    Text(t.realized_pnl, format: .currency(code: "USD").sign(strategy: .always()))
+                                        .font(.body.weight(.semibold))
+                                        .monospacedDigit()
+                                        .foregroundStyle(t.realized_pnl >= 0 ? Color.gain : Color.loss)
+                                        .frame(alignment: .trailing)
+                                }
+                                HStack {
+                                    Text("\(t.qty, format: .number.precision(.fractionLength(0))) @ \(t.entry_price, format: .currency(code: "USD")) → \(t.exit_price, format: .currency(code: "USD"))")
+                                        .font(.caption)
+                                        .monospacedDigit()
+                                        .foregroundStyle(Color.mutedForeground)
+                                    Spacer()
+                                    Text(shortTime(of: t.closed_at))
+                                        .font(.caption2)
+                                        .monospacedDigit()
+                                        .foregroundStyle(Color.mutedForeground)
+                                }
+                                .padding(.top, 2)
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 12)
+
+                            if t.id != trades.last?.id {
+                                Divider().overlay(Color.border)
+                            }
+                        }
+                    }
+                    .padding(.vertical, 0)
+                }
+            }
+        }
+    }
+
+    private func exitReasonBadge(_ reason: String) -> some View {
+        switch reason.lowercased() {
+        case "stop_loss": return SBadge(text: "STOP LOSS", variant: .destructive)
+        case "take_profit": return SBadge(text: "TAKE PROFIT", variant: .success)
+        case "flatten": return SBadge(text: "FLATTEN", variant: .secondary)
+        default: return SBadge(text: reason.uppercased(), variant: .secondary)
+        }
+    }
+
+    private func shortTime(of iso: String) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        guard let date = formatter.date(from: iso) else { return iso }
+        return date.formatted(.dateTime.hour(.twoDigits(amPM: .abbreviated)).minute())
     }
 
     private var decisionsSection: some View {
