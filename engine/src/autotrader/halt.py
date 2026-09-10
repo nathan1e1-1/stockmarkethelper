@@ -68,6 +68,10 @@ _HALT_REASONS = frozenset({
     "unconfirmed_terminal_release",
     "invalid_recovery_positions",
     "invalid_recovery_input",
+    # Session-integrity violation from recover()'s invalid-session path; deliberate.
+    "invalid_session",
+    # Recovery failing to persist would leave the recovered book unflushed; must stay fail-closed.
+    "recover_persistence_failure",
 })
 
 _SKIP_REASONS = frozenset({
