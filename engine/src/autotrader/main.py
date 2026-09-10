@@ -195,9 +195,11 @@ def main() -> None:
     )
 
     if args.recover:
-        # Restore persisted state first so the safety guard reads the real latched
-        # halt_reason; a fresh RiskManager always reports no halt. Mirrors request_rearm.
-        lifecycle.startup_reconcile()
+        # Hydrate persisted state minimally so the guard reads the real latched
+        # halt_reason. A full startup_reconcile would run _reconcile_and_cleanup, whose
+        # _true_safety_halt_latched only recognizes HALTING, letting a persisted HALTED
+        # hard_stop be overwritten by a recoverable broker_reconciliation_required.
+        lifecycle._restore_state()
         now = datetime.now(timezone.utc)
         positions = lifecycle._positions_snapshot(now)
         orders = lifecycle._open_orders(now)

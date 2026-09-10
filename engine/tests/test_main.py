@@ -175,3 +175,98 @@ def test_parse_args_recover_flag():
 def test_parse_args_default_recover_false():
     args = _parse_args([])
     assert args.recover is False
+
+
+from copy import deepcopy
+from datetime import datetime, timezone
+
+from autotrader.lifecycle import EngineLifecycle
+from autotrader.models import AccountSnapshot, PositionsSnapshot, RiskState
+from autotrader.risk import RiskManager
+from autotrader.runner import Runner
+from autotrader.state import State
+
+
+_RECOVER_NOW = datetime(2026, 9, 2, 14, 30, tzinfo=timezone.utc)
+
+
+class _RecoverConfig:
+    alpaca_paper = True
+    paper_capital = 100_000.0
+    max_position_pct = 0.0025
+    max_gross_exposure_pct = 0.0025
+    max_positions = 1
+    max_entries_per_session = 1
+    max_snapshot_age_seconds = 120
+    kill_switch_pct = 0.10
+    daily_loss_pct = 0.05
+    flatten_at_close = True
+    flatten_time = "15:55"
+    stop_loss_pct = 0.02
+    take_profit_pct = 0.03
+    entry_threshold = 2.0
+    signal_weights = {"momentum": 1.0}
+
+
+class _RecoverStore:
+    def __init__(self, loaded):
+        self.loaded = loaded
+        self.saved = []
+
+    def load(self):
+        return deepcopy(self.loaded)
+
+    def save(self, state):
+        self.saved.append(deepcopy(state))
+
+    def save_or_raise(self, state):
+        self.saved.append(deepcopy(state))
+
+
+class _RecoverExecutor:
+    def __init__(self, positions=None, orders=None, equity=100_000.0):
+        self.positions_value = positions or []
+        self.orders_value = orders or []
+        self.equity = equity
+
+    def account_snapshot(self, *, now=None):
+        return AccountSnapshot(self.equity, now or _RECOVER_NOW)
+
+    def positions_snapshot(self, *, now=None):
+        return PositionsSnapshot(deepcopy(self.positions_value), now or _RECOVER_NOW)
+
+    def open_orders(self, *, now=None):
+        return []
+
+
+def _recover_lifecycle(loaded, *, positions=None):
+    cfg = _RecoverConfig()
+    risk = RiskManager(cfg, clock=lambda: _RECOVER_NOW, session_id="2026-09-02")
+    executor = _RecoverExecutor(positions=positions)
+    store = _RecoverStore(loaded)
+    runner = Runner(None, None, executor, risk, cfg, state_store=store, clock=lambda: _RECOVER_NOW)
+    engine = EngineLifecycle(cfg, executor, risk, runner, store, clock=lambda: _RECOVER_NOW)
+    return engine, risk
+
+
+def test_restore_state_preserves_hard_stop_for_recover_guard():
+    """The --recover guard must see a persisted HALTED/hard_stop as a true-safety halt
+    AFTER minimal restore, so it refuses to clear it.
+
+    Regression: a full startup_reconcile() runs _reconcile_and_cleanup, whose
+    _true_safety_halt_latched only recognizes HALTING, so a persisted HALTED hard_stop
+    is overwritten by a recoverable broker_reconciliation_required and the guard is
+    bypassed. _restore_state() must preserve the HALT-class reason."""
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        risk_state=RiskState.HALTED,
+        halt_reason="hard_stop",
+        session_id="2026-09-02",
+    )
+    engine, risk = _recover_lifecycle(loaded, positions=[Position("AAPL", 4, 100.0)])
+
+    engine._restore_state()
+
+    assert risk.state is RiskState.HALTED
+    assert risk.halt_reason == "hard_stop"
+    assert engine._genuine_halt_latched() is True
