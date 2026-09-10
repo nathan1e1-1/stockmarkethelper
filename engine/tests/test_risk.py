@@ -114,7 +114,33 @@ def test_restore_persisted_safety_state_rebuilds_pending_buy_tracking_without_pr
         cutoff_latched=False,
     ) is True
     assert rm.apply_terminal_order("broker-1", "rejected", 0.0, 0.0) is True
-    assert rm.reservations == {}
+
+
+def test_restore_accepts_persisted_reservation_with_old_created_at(now):
+    """A reservation restored from disk may have been created long ago (its created_at is
+    old, often beyond the 120s snapshot window). That is normal durable state, NOT a stale
+    quote — restore must accept it, or a mid-session restart permanently fails to hydrate
+    and never adopts broker positions."""
+    rm = RiskManager(InitialPaperCfg(), clock=lambda: now, session_id="2026-09-01")
+    old = now - timedelta(hours=3)
+    reservation = Reservation("entry-2026-09-01-AAPL", "AAPL", 2.0, 100.0, old)
+    pending = Order(
+        "broker-1", "AAPL", Side.BUY, 2.0, status="accepted",
+        client_order_id=reservation.client_order_id, timestamp=old, observed_at=now,
+        filled_qty=0.0, filled_notional=0.0,
+    )
+
+    assert rm.restore_persisted_safety_state(
+        positions=[],
+        reservations=[reservation],
+        pending_orders=[pending],
+        risk_state=RiskState.ACTIVE,
+        halt_reason=None,
+        session_id="2026-09-01",
+        session_entry_count=1,
+        cutoff_latched=False,
+    ) is True
+    assert rm.reservations.get(reservation.client_order_id) is not None
 
 
 def test_hostile_session_id_is_halted_before_entry_reservation(now):

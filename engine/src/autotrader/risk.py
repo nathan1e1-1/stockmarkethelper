@@ -166,7 +166,6 @@ class RiskManager:
             and self._valid_ticker(reservation.ticker)
             and self._positive(reservation.qty)
             and self._positive(reservation.limit_price)
-            and self._timestamp_reason(reservation.created_at) is None
             for reservation in reservations
         ):
             return False
