@@ -633,3 +633,44 @@ def test_recovering_state_with_safety_reason_is_not_recovered():
 
     assert risk.state is not RiskState.ACTIVE
     assert risk.halt_reason == "hard_stop"
+
+
+def test_startup_with_held_broker_position_recovers_active():
+    """Startup with a HALTING state and a real broker position recovers to ACTIVE,
+    adopting the position, and never sells."""
+    position = Position("AAPL", 4, 100.0, opened_at=NOW)
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        risk_state=RiskState.HALTING,
+        session_id="2026-09-02",
+        halt_reason="broker_reconciliation_required",
+    )
+    executor = Executor(positions=[position], orders=[])
+    engine, risk, runner, executor, _ = lifecycle(store=Store(loaded), executor=executor)
+
+    assert engine.startup_reconcile() is True
+    assert risk.state is RiskState.ACTIVE
+    assert [(p.ticker, p.qty) for p in risk.positions] == [("AAPL", 4)]
+    assert executor.exit_requests == []
+
+
+def test_cross_day_rollover_starts_fresh_session():
+    """A long-lived process must roll into a fresh session when the date changes,
+    resetting session-scoped counters, even while holding a broker position."""
+    engine, risk, runner, _, _ = lifecycle()
+    assert engine.startup_reconcile() is True
+    # Move clock to next session.
+    next_day = datetime(2026, 9, 3, 9, 30, tzinfo=timezone.utc)
+    risk.session_entry_count = 3
+    risk.cutoff_latched = True
+    risk.daily_realized_loss_pct = 0.04
+    engine._clock = lambda: next_day
+    risk._clock = lambda: next_day
+
+    engine._ensure_rollover("2026-09-03")
+
+    assert risk.session_id == "2026-09-03"
+    assert risk.session_entry_count == 0
+    assert risk.cutoff_latched is False
+    assert risk.daily_realized_loss_pct == 0.0
+    assert risk.state is RiskState.ACTIVE

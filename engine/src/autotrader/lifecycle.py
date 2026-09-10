@@ -56,7 +56,38 @@ class EngineLifecycle:
         if not self._restored:
             self._restore_state()
             self._restored = True
+        now = self._now()
+        # Recover a restored non-ACTIVE state from broker truth before reconciling, so a
+        # recoverable halt (e.g. broker_reconciliation_required) is resolved by adopting
+        # the broker's real book. A genuine safety halt is never auto-recovered, and a
+        # prior-session state still awaiting an explicit local rearm is left untouched.
+        if self.risk.state is not RiskState.ACTIVE and self._recovery_permitted() and not self._genuine_halt_latched():
+            positions = self._positions_snapshot(now)
+            orders = self._open_orders(now)
+            if positions is not None and orders is not None:
+                self._recover_from_broker(positions, orders, now)
         return self._reconcile_and_cleanup() and self._account_valid and not self._requires_rearm
+
+    def _ensure_rollover(self, day: str) -> None:
+        """Roll a long-lived process into a fresh session from broker truth.
+
+        Called when the observed calendar day changes. Recovering with the new session
+        id resets session-scoped counters (RiskManager.recover's new-session branch) so
+        the new session starts clean instead of serving yesterday's state. Never runs
+        for a genuine safety halt, and never recovers from an unreadable broker snapshot.
+        """
+        now = self._now()
+        if self._session_id(now) != day:
+            return
+        if self.risk.session_id == day:
+            return
+        if self._genuine_halt_latched():
+            return
+        positions = self._positions_snapshot(now)
+        orders = self._open_orders(now)
+        if positions is None or orders is None:
+            return
+        self._recover_from_broker(positions, orders, now)
 
     def tick(self, now: datetime, universe: list[str]) -> bool:
         """Perform a single safe cycle; entries are last and only after reconciliation."""

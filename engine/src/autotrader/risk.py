@@ -525,7 +525,7 @@ class RiskManager:
         if not all(isinstance(item, str) for item in confirmed_client_ids):
             self.begin_halt("invalid_recovery_input")
             return False
-        if self.state is RiskState.ACTIVE:
+        if self.state is RiskState.ACTIVE and session_id == self.session_id:
             return True
         if not all(
             isinstance(position, Position)

@@ -134,6 +134,24 @@ def restore_same_day_state(loaded: State, day: str, runner, risk) -> bool:
     return True
 
 
+def _handle_day_change(day, *, lifecycle, shared, provider, cfg, universe) -> None:
+    """Apply the once-per-day transition in the perpetual serving loop.
+
+    Resets the published equity history, rebuilds the scan universe, and rolls the
+    lifecycle into the freshly observed session so session-scoped counters reset.
+    """
+    shared.equity_history = []
+    universe[:] = build_universe(
+        provider,
+        size=cfg.universe_size,
+        min_price=cfg.min_price,
+        min_volume=cfg.min_volume,
+        tickers_only=True,
+    )
+    print(f"Universe: {universe}")
+    lifecycle._ensure_rollover(day)
+
+
 def _parse_args(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="config/config.yaml")
@@ -273,9 +291,14 @@ def main() -> None:
             if day != current_day:
                 current_day = day
                 summary_done = False
-                shared.equity_history = []
-                universe[:] = build_universe(provider, size=cfg.universe_size, min_price=cfg.min_price, min_volume=cfg.min_volume, tickers_only=True)
-                print(f"Universe: {universe}")
+                _handle_day_change(
+                    day,
+                    lifecycle=lifecycle,
+                    shared=shared,
+                    provider=provider,
+                    cfg=cfg,
+                    universe=universe,
+                )
 
             if is_market_open(now):
                 sync_and_scan(day)

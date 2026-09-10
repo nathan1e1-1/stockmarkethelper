@@ -135,3 +135,33 @@ def test_refresh_live_prices_updates_in_place_via_batch():
     assert shared.pnl_attribution["open_positions"][0] is original_record  # in place
     assert original_record["current_price"] == 101.0
     assert original_record["unrealized_pnl"] == 10.0
+
+
+def test_main_loop_day_change_engages_session_rollover():
+    """The main loop's day-change branch must roll the lifecycle into the freshly
+    observed session (unit-tested via the factored helper; main() itself loops forever)."""
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from autotrader.main import _handle_day_change
+
+    lifecycle_stub = Mock()
+    provider = Mock()
+    provider.gainers.return_value = []
+    shared = SharedState()
+    shared.equity_history = [{"t": 1.0, "equity": 1.0}]
+    cfg = SimpleNamespace(universe_size=5, min_price=1.0, min_volume=0)
+    universe = ["OLD"]
+
+    _handle_day_change(
+        "2026-09-03",
+        lifecycle=lifecycle_stub,
+        shared=shared,
+        provider=provider,
+        cfg=cfg,
+        universe=universe,
+    )
+
+    lifecycle_stub._ensure_rollover.assert_called_once_with("2026-09-03")
+    assert shared.equity_history == []
+    assert universe == []
