@@ -169,6 +169,32 @@ def _parse_args(argv=None):
     return parser.parse_args(argv)
 
 
+def run_recovery_cli(lifecycle, store, runner) -> int:
+    """Run broker-truth recovery via the CLI.
+
+    Returns 0 if recovery yields a clean ACTIVE result, 1 if aborted (unreadable broker
+    snapshot, or a latched true-safety halt that must never be cleared by recovery).
+    """
+    # Hydrate persisted state minimally so the guard reads the real latched halt_reason.
+    # A full startup_reconcile() would run _reconcile_and_cleanup, whose
+    # _true_safety_halt_latched only recognizes HALTING, letting a persisted HALTED
+    # hard_stop be overwritten by a recoverable broker_reconciliation_required.
+    lifecycle._restore_state()
+    now = lifecycle._now()
+    positions = lifecycle._positions_snapshot(now)
+    orders = lifecycle._open_orders(now)
+    if positions is None or orders is None:
+        print("[safety] recovery aborted: broker snapshot unreadable")
+        return 1
+    if lifecycle._genuine_halt_latched():
+        print("[safety] recovery refused: true-safety halt latched; use --rearm after a clean reconciliation")
+        return 1
+    ok = lifecycle._recover_from_broker(positions, orders, now)
+    store.save(runner._state())
+    print("[safety] recovery " + ("complete; engine ACTIVE" if ok else "incomplete"))
+    return 0 if ok else 1
+
+
 def main() -> None:
     args = _parse_args()
 
@@ -195,24 +221,7 @@ def main() -> None:
     )
 
     if args.recover:
-        # Hydrate persisted state minimally so the guard reads the real latched
-        # halt_reason. A full startup_reconcile would run _reconcile_and_cleanup, whose
-        # _true_safety_halt_latched only recognizes HALTING, letting a persisted HALTED
-        # hard_stop be overwritten by a recoverable broker_reconciliation_required.
-        lifecycle._restore_state()
-        now = datetime.now(timezone.utc)
-        positions = lifecycle._positions_snapshot(now)
-        orders = lifecycle._open_orders(now)
-        if positions is None or orders is None:
-            print("[safety] recovery aborted: broker snapshot unreadable")
-            sys.exit(1)
-        if lifecycle._genuine_halt_latched():
-            print("[safety] recovery refused: true-safety halt latched; use --rearm after a clean reconciliation")
-            sys.exit(1)
-        ok = lifecycle._recover_from_broker(positions, orders, now)
-        store.save(runner._state())
-        print("[safety] recovery " + ("complete; engine ACTIVE" if ok else "incomplete"))
-        sys.exit(0 if ok else 1)
+        sys.exit(run_recovery_cli(lifecycle, store, runner))
 
     app = create_app(shared, provider=provider, llm=agent)
     if not args.once and not args.rearm and not args.recover:

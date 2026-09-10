@@ -2,7 +2,7 @@ import socket
 import threading
 import time
 
-from autotrader.main import _parse_args, _port_busy, _wait_port_free
+from autotrader.main import _parse_args, _port_busy, _wait_port_free, run_recovery_cli
 
 
 def test_port_busy_true_when_something_is_listening():
@@ -246,27 +246,29 @@ def _recover_lifecycle(loaded, *, positions=None):
     store = _RecoverStore(loaded)
     runner = Runner(None, None, executor, risk, cfg, state_store=store, clock=lambda: _RECOVER_NOW)
     engine = EngineLifecycle(cfg, executor, risk, runner, store, clock=lambda: _RECOVER_NOW)
-    return engine, risk
+    return engine, risk, runner, store
 
 
-def test_restore_state_preserves_hard_stop_for_recover_guard():
-    """The --recover guard must see a persisted HALTED/hard_stop as a true-safety halt
-    AFTER minimal restore, so it refuses to clear it.
+def test_recovery_cli_refuses_persisted_hard_stop_with_orphan_position():
+    """--recover must NEVER clear a persisted HALT-class halt_reason.
 
-    Regression: a full startup_reconcile() runs _reconcile_and_cleanup, whose
-    _true_safety_halt_latched only recognizes HALTING, so a persisted HALTED hard_stop
-    is overwritten by a recoverable broker_reconciliation_required and the guard is
-    bypassed. _restore_state() must preserve the HALT-class reason."""
+    Regression: the handler previously hydrated state with startup_reconcile(), whose
+    full reconcile downgrades a persisted HALTED + hard_stop to a RECOVERABLE
+    broker_reconciliation_required when a broker orphan exists, bypassing the guard and
+    clearing the true-safety halt. Drive the actual handler sequence via the helper so
+    the test fails on the pre-fix hydration and passes on the minimal _restore_state()
+    hydration."""
     loaded = State(
         equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
         risk_state=RiskState.HALTED,
         halt_reason="hard_stop",
         session_id="2026-09-02",
     )
-    engine, risk = _recover_lifecycle(loaded, positions=[Position("AAPL", 4, 100.0)])
+    engine, risk, runner, store = _recover_lifecycle(loaded, positions=[Position("AAPL", 4, 100.0)])
 
-    engine._restore_state()
+    result = run_recovery_cli(engine, store, runner)
 
-    assert risk.state is RiskState.HALTED
+    assert result == 1
     assert risk.halt_reason == "hard_stop"
-    assert engine._genuine_halt_latched() is True
+    assert risk.state is RiskState.HALTED
+    assert store.saved == []
