@@ -212,7 +212,14 @@ struct DashboardView: View {
             .padding(20)
         }
         .onChange(of: history.flatMap { [$0.t, $0.equity] }) { _, _ in
-            highlightedEquityPoint = nil
+            // Only drop the highlight if the point the user is hovering no longer exists
+            // (e.g. it scrolled out of the capped window). Do NOT clear on every 5s data
+            // refresh — that makes the crosshair/tooltip flicker while looking through
+            // prices.
+            if let highlightedEquityPoint,
+               !history.contains(where: { $0.id == highlightedEquityPoint.id }) {
+                self.highlightedEquityPoint = nil
+            }
         }
     }
 
