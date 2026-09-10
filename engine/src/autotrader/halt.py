@@ -20,6 +20,11 @@ class HaltClass(str, Enum):
     RECOVERABLE = "recoverable"
 
 
+# Book-identity, config-integrity, and settlement-integrity violations. These must
+# stay fail-closed: an unresolved discrepancy here means the engine can no longer trust
+# its own books, config, or settlement state, so the whole session stops. Listed
+# explicitly (not left to the catch-all default) so the decision is deliberate and
+# visible to future readers.
 _HALT_REASONS = frozenset({
     "pre_submit_persistence_failure",
     "post_acknowledgement_persistence_failure",
@@ -56,6 +61,11 @@ _HALT_REASONS = frozenset({
     "missing_risk_manager",
     "exit_submission_unavailable",
     "session_cutoff",
+    "invalid_order_side",
+    "invalid_acknowledgement",
+    "invalid_flatten_time",
+    "invalid_realized_loss",
+    "unconfirmed_terminal_release",
 })
 
 _SKIP_REASONS = frozenset({
@@ -76,6 +86,7 @@ _RECOVERABLE_REASONS = frozenset({
     "prior_session_requires_rearm",
     "invalid_persisted_risk_state",
     "lifecycle_reconciliation_required",
+    "exit_submission_unknown",
 })
 
 
