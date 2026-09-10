@@ -1045,3 +1045,15 @@ def test_recover_rejects_malformed_inputs_fail_closed(now):
     assert rm.recover(positions=None, confirmed_client_ids=[], session_id="2026-09-01") is False
     assert rm.recover(positions=[], confirmed_client_ids=None, session_id="2026-09-01") is False
     assert rm.state is not RiskState.ACTIVE
+
+
+def test_recover_rejects_malformed_confirmed_client_elements(now):
+    rm = RiskManager(InitialPaperCfg(), clock=lambda: now, session_id="2026-09-01")
+    rm.begin_halt("broker_reconciliation_required")
+    assert rm.recover(
+        positions=[], confirmed_client_ids=[["not-a-str"]], session_id="2026-09-01"
+    ) is False
+    assert rm.recover(
+        positions=[], confirmed_client_ids=[1], session_id="2026-09-01"
+    ) is False
+    assert rm.state is not RiskState.ACTIVE

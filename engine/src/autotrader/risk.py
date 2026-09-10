@@ -522,6 +522,9 @@ class RiskManager:
         if not isinstance(positions, list) or not isinstance(confirmed_client_ids, list):
             self.begin_halt("invalid_recovery_input")
             return False
+        if not all(isinstance(item, str) for item in confirmed_client_ids):
+            self.begin_halt("invalid_recovery_input")
+            return False
         if self.state is RiskState.ACTIVE:
             return True
         if not all(
