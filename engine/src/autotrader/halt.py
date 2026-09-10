@@ -59,13 +59,11 @@ _HALT_REASONS = frozenset({
 })
 
 _SKIP_REASONS = frozenset({
-    "invalid_quote",
     "entry_exception",
+    "exit_exception",
     "stale_quote",
     "invalid_timestamp",
     "invalid_exit_quote",
-    "unknown_quote",
-    "insufficient_data",
 })
 
 _RECOVERABLE_REASONS = frozenset({
