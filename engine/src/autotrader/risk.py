@@ -519,6 +519,9 @@ class RiskManager:
         if not self._valid_session_id(session_id):
             self.begin_halt("invalid_session")
             return False
+        if not isinstance(positions, list) or not isinstance(confirmed_client_ids, list):
+            self.begin_halt("invalid_recovery_input")
+            return False
         if self.state is RiskState.ACTIVE:
             return True
         if not all(
@@ -533,24 +536,38 @@ class RiskManager:
         if len({position.ticker for position in positions}) != len(positions):
             self.begin_halt("invalid_recovery_positions")
             return False
+        new_session = session_id != self.session_id
         confirmed = set(confirmed_client_ids)
-        # Iterate over a copy so removals during the loop are safe.
-        for client_order_id in list(self._acknowledged_entries):
-            if client_order_id not in confirmed:
-                self._acknowledged_entries.pop(client_order_id, None)
-                reservation = self.reservations.pop(client_order_id, None)
-                if reservation is not None:
-                    self._released_reservations.add(client_order_id)
-                stale_broker_ids = [
-                    broker_id
-                    for broker_id, pending in self._pending_entries.items()
-                    if pending.reservation_id == client_order_id
-                ]
-                for broker_id in stale_broker_ids:
-                    self._pending_entries.pop(broker_id, None)
+        # Snapshot the keys first so removals during the sweep are safe, and so
+        # unacknowledged reservations (created but never bound) are released too.
+        reservation_ids = list(self.reservations)
+        acknowledged_ids = list(self._acknowledged_entries)
+        dangling_broker_ids = [
+            broker_id
+            for broker_id, pending in self._pending_entries.items()
+            if pending.reservation_id not in confirmed
+        ]
+        for client_order_id in reservation_ids:
+            if client_order_id in confirmed:
+                continue
+            reservation = self.reservations.pop(client_order_id, None)
+            if reservation is not None:
+                self._released_reservations.add(client_order_id)
+        for acknowledged_id in acknowledged_ids:
+            if acknowledged_id in confirmed:
+                continue
+            self._acknowledged_entries.pop(acknowledged_id, None)
+        for broker_id in dangling_broker_ids:
+            self._pending_entries.pop(broker_id, None)
         self.positions = list(positions)
         self.state = RiskState.ACTIVE
         self.halt_reason = None
+        if new_session:
+            self.session_entry_count = 0
+            self.cutoff_latched = False
+            self.daily_realized_loss_pct = 0.0
+        else:
+            self.session_entry_count = len(self._acknowledged_entries)
         self.session_id = session_id
         return True
 

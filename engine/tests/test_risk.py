@@ -986,3 +986,62 @@ def test_recover_is_noop_when_already_active(now):
     rm = RiskManager(InitialPaperCfg(), clock=lambda: now, session_id="2026-09-01")
     assert rm.state is RiskState.ACTIVE
     assert rm.recover(positions=[], confirmed_client_ids=[], session_id="2026-09-01") is True
+
+
+def test_recover_releases_unacknowledged_ghost_reservation(now):
+    """An entry essayed but never acknowledged (submit raised) must NOT survive
+    recovery as a slot-blocking ghost."""
+    rm = RiskManager(InitialPaperCfg(), clock=lambda: now, session_id="2026-09-01")
+    admission = rm.reserve_entry("AAPL", 2, 100.0, 100_000.0, now)
+    assert admission.accepted
+    rm.begin_halt("broker_reconciliation_required")
+
+    ok = rm.recover(positions=[], confirmed_client_ids=[], session_id="2026-09-01")
+
+    assert ok is True
+    assert rm.reservations == {}
+    assert rm.state is RiskState.ACTIVE
+
+
+def test_recover_refunds_session_entry_slot_for_released_ghost(now):
+    rm = RiskManager(InitialPaperCfg(), clock=lambda: now, session_id="2026-09-01")
+    admission = rm.reserve_entry("AAPL", 2, 100.0, 100_000.0, now)
+    rm.bind_acknowledgement(admission.reservation.client_order_id, "broker-1")
+    rm.begin_halt("broker_reconciliation_required")
+
+    ok = rm.recover(positions=[], confirmed_client_ids=[], session_id="2026-09-01")
+
+    assert ok is True
+    assert rm.session_entry_count == 0
+    assert rm.reserve_entry("MSFT", 1, 100.0, 100_000.0, now).accepted
+
+
+def test_recover_resets_session_counters_on_cross_session(now):
+    rm = RiskManager(InitialPaperCfg(), clock=lambda: now, session_id="2026-09-01")
+    admission = rm.reserve_entry("AAPL", 2, 100.0, 100_000.0, now)
+    rm.bind_acknowledgement(admission.reservation.client_order_id, "broker-1")
+    rm.session_entry_count = 7
+    rm.cutoff_latched = True
+    rm.daily_realized_loss_pct = 0.03
+    rm.begin_halt("broker_reconciliation_required")
+
+    ok = rm.recover(
+        positions=[],
+        confirmed_client_ids=[admission.reservation.client_order_id],
+        session_id="2026-09-02",
+    )
+
+    assert ok is True
+    assert rm.session_id == "2026-09-02"
+    assert rm.session_entry_count == 0
+    assert rm.cutoff_latched is False
+    assert rm.daily_realized_loss_pct == 0.0
+    assert rm.reservations.get(admission.reservation.client_order_id) is not None
+
+
+def test_recover_rejects_malformed_inputs_fail_closed(now):
+    rm = RiskManager(InitialPaperCfg(), clock=lambda: now, session_id="2026-09-01")
+    rm.begin_halt("broker_reconciliation_required")
+    assert rm.recover(positions=None, confirmed_client_ids=[], session_id="2026-09-01") is False
+    assert rm.recover(positions=[], confirmed_client_ids=None, session_id="2026-09-01") is False
+    assert rm.state is not RiskState.ACTIVE

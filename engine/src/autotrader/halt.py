@@ -66,6 +66,8 @@ _HALT_REASONS = frozenset({
     "invalid_flatten_time",
     "invalid_realized_loss",
     "unconfirmed_terminal_release",
+    "invalid_recovery_positions",
+    "invalid_recovery_input",
 })
 
 _SKIP_REASONS = frozenset({
