@@ -500,3 +500,66 @@ def test_recovery_never_sells_held_broker_position():
     assert executor.exit_requests == []
     assert risk.state is RiskState.ACTIVE
     assert [(p.ticker, p.qty) for p in risk.positions] == [("AAPL", 4)]
+
+
+def test_hard_stop_halt_survives_broker_divergence():
+    """A genuine -25% kill-switch halt must NOT be cleared when a broker divergence
+    is detected in the same reconcile cycle."""
+    position = Position("AAPL", 4, 100.0, opened_at=NOW)
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        risk_state=RiskState.HALTING,
+        session_id="2026-09-02",
+        halt_reason="hard_stop",
+        positions=[position],
+    )
+    # Broker holds our AAPL *and* an extra orphan MSFT -> a real local<->broker divergence.
+    executor = Executor(positions=[position, Position("MSFT", 3, 50.0, opened_at=NOW)], orders=[])
+    engine, risk, runner, executor, _ = lifecycle(store=Store(loaded), executor=executor)
+
+    engine.startup_reconcile()
+
+    assert risk.state is not RiskState.ACTIVE
+    assert risk.halt_reason == "hard_stop"
+    assert executor.exit_requests == []
+
+
+def test_daily_stop_halt_survives_broker_divergence():
+    position = Position("AAPL", 4, 100.0, opened_at=NOW)
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        risk_state=RiskState.HALTING,
+        session_id="2026-09-02",
+        halt_reason="daily_stop",
+        positions=[position],
+    )
+    executor = Executor(positions=[position, Position("MSFT", 3, 50.0, opened_at=NOW)], orders=[])
+    engine, risk, runner, executor, _ = lifecycle(store=Store(loaded), executor=executor)
+
+    engine.startup_reconcile()
+
+    assert risk.state is not RiskState.ACTIVE
+    assert risk.halt_reason == "daily_stop"
+    assert executor.exit_requests == []
+
+
+def test_true_safety_halt_survives_repeated_broker_divergence():
+    """The post-reconcile re-read must not clobber a genuine safety halt on a later
+    cycle either: a latched hard_stop stays latched across repeated reconciles."""
+    position = Position("AAPL", 4, 100.0, opened_at=NOW)
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        risk_state=RiskState.HALTING,
+        session_id="2026-09-02",
+        halt_reason="hard_stop",
+        positions=[position],
+    )
+    executor = Executor(positions=[position, Position("MSFT", 3, 50.0, opened_at=NOW)], orders=[])
+    engine, risk, runner, executor, _ = lifecycle(store=Store(loaded), executor=executor)
+
+    engine.startup_reconcile()
+    engine._reconcile_and_cleanup()
+
+    assert risk.state is not RiskState.ACTIVE
+    assert risk.halt_reason == "hard_stop"
+    assert executor.exit_requests == []

@@ -180,6 +180,11 @@ class EngineLifecycle:
             self._begin_halt("invalid_broker_snapshot")
             return False
 
+        # A genuine integrity halt (kill switch, daily stop) must survive the whole
+        # reconcile. RiskManager.begin_halt overwrites halt_reason unconditionally, so
+        # capture it before a broker divergence can latch a recoverable reason over it.
+        safety_halt_latched = self._true_safety_halt_latched()
+
         local_orders = {order.id: order for order in self.runner.pending_orders}
         local_client_ids = {order.client_order_id for order in self.runner.pending_orders}
         pending_buy_tickers = {order.ticker for order in self.runner.pending_orders if order.side is Side.BUY}
@@ -195,8 +200,9 @@ class EngineLifecycle:
         missing_broker_positions = [position for ticker, position in local_by_ticker.items() if not self._same_position(broker_by_ticker.get(ticker), position)]
 
         if orphan_orders or missing_local_orders or orphan_positions or missing_broker_positions:
-            self._begin_halt("broker_reconciliation_required")
-        if self._recovery_permitted():
+            if not safety_halt_latched:
+                self._begin_halt("broker_reconciliation_required")
+        if self._recovery_permitted() and not safety_halt_latched:
             # Regenerate local books from broker truth (adopt real positions, release
             # ghosts, bind confirmed orders). Never submits a sell. If broker truth
             # cannot be read, risk stays HALTING/RECOVERING and the next tick retries.
@@ -238,7 +244,8 @@ class EngineLifecycle:
             self._persist_or_halt("halt_persistence_failure")
             self._broker_clean = self.risk.state is RiskState.HALTED
         elif unmatched_orders or position_mismatch:
-            self._begin_halt("broker_reconciliation_required")
+            if not safety_halt_latched:
+                self._begin_halt("broker_reconciliation_required")
         elif self.risk.state is RiskState.ACTIVE:
             self._broker_clean = reconciled
         else:
@@ -262,6 +269,18 @@ class EngineLifecycle:
             if found is None or not self._fresh(getattr(found, "observed_at", None)):
                 return True
         return False
+
+    def _true_safety_halt_latched(self) -> bool:
+        """True when a fail-closed (HALT-class) integrity halt is currently latched.
+
+        RiskManager.begin_halt overwrites halt_reason unconditionally, so reconcile
+        must remember this before latching a recoverable divergence over it.
+        """
+        return (
+            self.risk.state is RiskState.HALTING
+            and self.risk.halt_reason is not None
+            and classify_halt(self.risk.halt_reason) is HaltClass.HALT
+        )
 
     def _recovery_permitted(self) -> bool:
         """Only broker-truth divergence is recoverable, never a true-safety halt.
