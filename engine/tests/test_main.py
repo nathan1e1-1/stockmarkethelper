@@ -137,6 +137,41 @@ def test_refresh_live_prices_updates_in_place_via_batch():
     assert original_record["unrealized_pnl"] == 10.0
 
 
+def test_publish_live_equity_appends_history_point_every_refresh():
+    """The dashboard graph should get a fresh point on every fast 5s refresh, not only
+    once per 60s scan tick. This is what makes the P&L line smooth while watching."""
+    provider = StubProvider()
+    provider.prices = {"NVDA": 101.0}
+    shared = SharedState()
+    shared.equity = Equity(equity=100_000.0, day_start_equity=100_000.0, peak_equity=100_000.0, day="2026-09-09")
+    shared.pnl_attribution = {
+        "open_positions": [
+            {"ticker": "NVDA", "qty": 10.0, "avg_entry_price": 100.0, "current_price": 100.0, "unrealized_pnl": 0.0},
+        ],
+    }
+    shared.equity_history = [{"t": 1700000000.0, "equity": 100_000.0}]
+
+    from autotrader.main import publish_live_equity, refresh_live_prices
+    refresh_live_prices(shared, provider)  # prices 101 -> unrealized 10
+    publish_live_equity(shared)
+
+    assert len(shared.equity_history) == 2
+    assert shared.equity_history[-1]["equity"] == 100_010.0  # day_start + unrealized 10
+    assert shared.equity.equity == 100_010.0
+
+
+def test_publish_live_equity_caps_history_window():
+    """History is capped so repeated 5s appends don't grow unboundedly."""
+    shared = SharedState()
+    shared.equity = Equity(equity=100_000.0, day_start_equity=100_000.0, peak_equity=100_000.0, day="2026-09-09")
+    shared.equity_history = [{"t": float(i), "equity": 99_000.0 + i} for i in range(400)]
+
+    from autotrader.main import publish_live_equity, _MAX_EQUITY_HISTORY
+    publish_live_equity(shared)
+
+    assert len(shared.equity_history) <= _MAX_EQUITY_HISTORY
+
+
 def test_main_loop_day_change_engages_session_rollover():
     """The main loop's day-change branch must roll the lifecycle into the freshly
     observed session (unit-tested via the factored helper; main() itself loops forever)."""

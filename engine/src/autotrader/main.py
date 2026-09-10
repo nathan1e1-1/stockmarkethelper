@@ -124,6 +124,32 @@ def refresh_live_prices(shared, provider) -> None:
         record["unrealized_pnl_pct"] = ((current_price - entry) / entry) * 100 if entry else None
 
 
+_MAX_EQUITY_HISTORY = 480  # ~40 min of 5s samples; bounded so the live graph stays smooth
+
+
+def publish_live_equity(shared) -> None:
+    """Publish the current live equity and append a history point, decoupled from the
+    60s scan tick so /api/status (and the dashboard P&L line) updates every 5s.
+
+    Live equity = day-start baseline + sum of unrealized P&L from the fast-published
+    snapshot. If no live snapshot is available, the persisted equity is re-pointed.
+    Never touches lifecycle/risk/trading state.
+    """
+    day_start = getattr(shared.equity, "day_start_equity", None)
+    attribution = shared.pnl_attribution or {}
+    total_unrealized = 0.0
+    for record in attribution.get("open_positions", []):
+        unrealized = record.get("unrealized_pnl")
+        if isinstance(unrealized, (int, float)) and not isinstance(unrealized, bool):
+            total_unrealized += unrealized
+    live_equity = (day_start or 0.0) + total_unrealized
+    if shared.equity is not None:
+        shared.equity.equity = live_equity
+    shared.equity_history.append({"t": time.time(), "equity": live_equity})
+    if len(shared.equity_history) > _MAX_EQUITY_HISTORY:
+        del shared.equity_history[:-_MAX_EQUITY_HISTORY]
+
+
 def restore_same_day_state(loaded: State, day: str, runner, risk) -> bool:
     if not same_day(loaded, day):
         return False
@@ -309,6 +335,7 @@ def main() -> None:
             if is_market_open(datetime.now(EASTERN)):
                 try:
                     refresh_live_prices(shared, provider)
+                    publish_live_equity(shared)
                 except Exception as exc:
                     print(f"[error] fast price publisher: {exc}")
             time.sleep(interval_seconds)
