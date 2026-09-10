@@ -2,7 +2,7 @@ import socket
 import threading
 import time
 
-from autotrader.main import _port_busy, _wait_port_free
+from autotrader.main import _parse_args, _port_busy, _wait_port_free
 
 
 def test_port_busy_true_when_something_is_listening():
@@ -165,3 +165,13 @@ def test_main_loop_day_change_engages_session_rollover():
     lifecycle_stub._ensure_rollover.assert_called_once_with("2026-09-03")
     assert shared.equity_history == []
     assert universe == []
+
+
+def test_parse_args_recover_flag():
+    args = _parse_args(["--recover"])
+    assert args.recover is True
+
+
+def test_parse_args_default_recover_false():
+    args = _parse_args([])
+    assert args.recover is False

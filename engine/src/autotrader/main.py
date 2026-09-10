@@ -161,6 +161,11 @@ def _parse_args(argv=None):
         action="store_true",
         help="Locally re-arm a fully reconciled paper engine for the current session, then exit",
     )
+    parser.add_argument(
+        "--recover",
+        action="store_true",
+        help="Reconcile from broker truth (adopt positions, release ghosts) and exit 0 on a clean ACTIVE result",
+    )
     return parser.parse_args(argv)
 
 
@@ -189,8 +194,26 @@ def main() -> None:
         cfg, executor, risk, runner, store, clock=lambda: datetime.now(timezone.utc)
     )
 
+    if args.recover:
+        # Restore persisted state first so the safety guard reads the real latched
+        # halt_reason; a fresh RiskManager always reports no halt. Mirrors request_rearm.
+        lifecycle.startup_reconcile()
+        now = datetime.now(timezone.utc)
+        positions = lifecycle._positions_snapshot(now)
+        orders = lifecycle._open_orders(now)
+        if positions is None or orders is None:
+            print("[safety] recovery aborted: broker snapshot unreadable")
+            sys.exit(1)
+        if lifecycle._genuine_halt_latched():
+            print("[safety] recovery refused: true-safety halt latched; use --rearm after a clean reconciliation")
+            sys.exit(1)
+        ok = lifecycle._recover_from_broker(positions, orders, now)
+        store.save(runner._state())
+        print("[safety] recovery " + ("complete; engine ACTIVE" if ok else "incomplete"))
+        sys.exit(0 if ok else 1)
+
     app = create_app(shared, provider=provider, llm=agent)
-    if not args.once and not args.rearm:
+    if not args.once and not args.rearm and not args.recover:
         if not _wait_port_free("127.0.0.1", 8001):
             print(
                 "[safety] another engine instance is running (127.0.0.1:8001 is in use); "
