@@ -674,3 +674,45 @@ def test_cross_day_rollover_starts_fresh_session():
     assert risk.cutoff_latched is False
     assert risk.daily_realized_loss_pct == 0.0
     assert risk.state is RiskState.ACTIVE
+
+
+def test_rollover_does_not_bypass_explicit_rearm():
+    """A prior-session ACTIVE state with _requires_rearm must NOT be auto-rolled at
+    startup by _ensure_rollover — it requires an explicit local rearm."""
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-01"),
+        risk_state=RiskState.ACTIVE,
+        session_id="2026-09-01",
+    )
+    executor = Executor(positions=[], orders=[], equity=100_000.0)
+    engine, risk, runner, _, _ = lifecycle(store=Store(loaded), executor=executor)
+
+    assert engine.startup_reconcile() is False
+    assert risk.state is not RiskState.ACTIVE
+    assert engine._requires_rearm is True
+    next_day = datetime(2026, 9, 2, 9, 30, tzinfo=timezone.utc)
+    engine._clock = lambda: next_day
+    risk._clock = lambda: next_day
+
+    engine._ensure_rollover("2026-09-02")
+
+    assert risk.session_id == "2026-09-01"  # not rolled; rearm still required
+    assert engine._requires_rearm is True
+
+
+def test_rollover_refreshes_day_start_equity_baseline():
+    """A cross-day rollover must reset day_start_equity/peak_equity to the new day's
+    broker equity so stop baselines are fresh."""
+    executor = Executor(equity=80_000.0)
+    engine, risk, runner, executor, _ = lifecycle(executor=executor)
+    assert engine.startup_reconcile() is True
+    executor.equity = 95_000.0  # the new session's broker equity differs from startup
+    next_day = datetime(2026, 9, 3, 9, 30, tzinfo=timezone.utc)
+    engine._clock = lambda: next_day
+    risk._clock = lambda: next_day
+
+    engine._ensure_rollover("2026-09-03")
+
+    assert risk.day_start_equity == 95_000.0
+    assert risk.peak_equity == 95_000.0
+    assert risk.session_id == "2026-09-03"

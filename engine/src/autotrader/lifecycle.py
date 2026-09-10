@@ -73,21 +73,33 @@ class EngineLifecycle:
 
         Called when the observed calendar day changes. Recovering with the new session
         id resets session-scoped counters (RiskManager.recover's new-session branch) so
-        the new session starts clean instead of serving yesterday's state. Never runs
-        for a genuine safety halt, and never recovers from an unreadable broker snapshot.
+        the new session starts clean instead of serving yesterday's state. A prior
+        session still awaiting an explicit local rearm and a genuine safety halt are
+        never auto-rolled.
         """
+        if self._requires_rearm:
+            return
+        if self._genuine_halt_latched():
+            return
         now = self._now()
         if self._session_id(now) != day:
             return
         if self.risk.session_id == day:
             return
-        if self._genuine_halt_latched():
+        positions = self._positions_snapshot(now) or []
+        orders = self._open_orders(now) or []
+        if not self._recover_from_broker(positions, orders, now):
             return
-        positions = self._positions_snapshot(now)
-        orders = self._open_orders(now)
-        if positions is None or orders is None:
+        # A new session re-baselines its stop levels (daily_stop/hard_stop) from a
+        # fresh broker account snapshot, exactly like a cold startup would.
+        snapshot = self._account_snapshot(now)
+        if snapshot is None:
             return
-        self._recover_from_broker(positions, orders, now)
+        self.risk.day_start_equity = snapshot.equity
+        self.risk.peak_equity = snapshot.equity
+        self.runner.equity = Equity(
+            snapshot.equity, snapshot.equity, snapshot.equity, self._session_id(now)
+        )
 
     def tick(self, now: datetime, universe: list[str]) -> bool:
         """Perform a single safe cycle; entries are last and only after reconciliation."""
