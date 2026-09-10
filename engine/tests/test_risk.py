@@ -897,3 +897,92 @@ def test_nonpositive_stop_loss_pct_denies_reserve_entry_without_throwing(zero_st
     admission = zero_stop_multi_risk.reserve_entry("AAPL", 20, 100.0, 100_000.0, now)
     assert admission.accepted is False
     assert admission.reason == "invalid_input"
+
+
+def test_recover_transitions_to_active_and_adopts_positions(now):
+    rm = RiskManager(InitialPaperCfg(), clock=lambda: now, session_id="2026-09-01")
+    rm.begin_halt("broker_reconciliation_required")
+
+    ok = rm.recover(
+        positions=[Position(ticker="AAPL", qty=4, avg_entry_price=100.0)],
+        confirmed_client_ids=[],
+        session_id="2026-09-01",
+    )
+
+    assert ok is True
+    assert rm.state is RiskState.ACTIVE
+    assert rm.halt_reason is None
+    assert [(p.ticker, p.qty) for p in rm.positions] == [("AAPL", 4)]
+
+
+def test_recover_releases_ghost_reservation_without_broker_confirmation(now):
+    rm = RiskManager(InitialPaperCfg(), clock=lambda: now, session_id="2026-09-01")
+    admission = rm.reserve_entry("AAPL", 2, 100.0, 100_000.0, now)
+    assert admission.accepted
+    rm.bind_acknowledgement(admission.reservation.client_order_id, "broker-1")
+    rm.begin_halt("broker_reconciliation_required")
+
+    ok = rm.recover(
+        positions=[],
+        confirmed_client_ids=[],
+        session_id="2026-09-01",
+    )
+
+    assert ok is True
+    assert rm.state is RiskState.ACTIVE
+    assert rm.reservations == {}
+    assert rm._pending_entries == {}
+
+
+def test_recover_keeps_broker_confirmed_intent_bound(now):
+    rm = RiskManager(InitialPaperCfg(), clock=lambda: now, session_id="2026-09-01")
+    admission = rm.reserve_entry("AAPL", 2, 100.0, 100_000.0, now)
+    rm.bind_acknowledgement(admission.reservation.client_order_id, "broker-1")
+    rm.begin_halt("broker_reconciliation_required")
+
+    ok = rm.recover(
+        positions=[],
+        confirmed_client_ids=[admission.reservation.client_order_id],
+        session_id="2026-09-01",
+    )
+
+    assert ok is True
+    assert rm.state is RiskState.ACTIVE
+    assert rm.reservations.get(admission.reservation.client_order_id) is not None
+
+
+def test_recover_never_creates_sell_intents(now):
+    rm = RiskManager(InitialPaperCfg(), clock=lambda: now, session_id="2026-09-01")
+    rm.positions = [Position(ticker="AAPL", qty=4, avg_entry_price=100.0)]
+    rm.begin_halt("broker_reconciliation_required")
+
+    ok = rm.recover(
+        positions=[Position(ticker="AAPL", qty=4, avg_entry_price=100.0)],
+        confirmed_client_ids=[],
+        session_id="2026-09-01",
+    )
+
+    assert ok is True
+    assert rm.state is RiskState.ACTIVE
+    assert len(rm.positions) == 1
+
+
+def test_recover_rejects_invalid_positions_or_session(now):
+    rm = RiskManager(InitialPaperCfg(), clock=lambda: now, session_id="2026-09-01")
+    rm.begin_halt("broker_reconciliation_required")
+
+    assert rm.recover(positions=[], confirmed_client_ids=[], session_id="not-a-session") is False
+    assert rm.recover(
+        positions=[Position(ticker="AAPL", qty=0, avg_entry_price=100.0)],
+        confirmed_client_ids=[], session_id="2026-09-01",
+    ) is False
+    assert rm.recover(
+        positions=[Position(ticker="A", qty=1, avg_entry_price=1.0), Position(ticker="A", qty=2, avg_entry_price=2.0)],
+        confirmed_client_ids=[], session_id="2026-09-01",
+    ) is False
+
+
+def test_recover_is_noop_when_already_active(now):
+    rm = RiskManager(InitialPaperCfg(), clock=lambda: now, session_id="2026-09-01")
+    assert rm.state is RiskState.ACTIVE
+    assert rm.recover(positions=[], confirmed_client_ids=[], session_id="2026-09-01") is True

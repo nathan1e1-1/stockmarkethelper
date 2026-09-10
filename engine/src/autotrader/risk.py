@@ -502,6 +502,59 @@ class RiskManager:
         return True
 
     @_synchronized
+    def recover(
+        self,
+        *,
+        positions: list[Position],
+        confirmed_client_ids: list[str],
+        session_id: str,
+    ) -> bool:
+        """Reconcile local books from broker-confirmed truth. Never sells.
+
+        positions: broker-reported positions to adopt (real holdings).
+        confirmed_client_ids: client order IDs the broker confirmed still exist as
+            open/terminal orders. Ghost intents (acknowledged entries/reservations not
+            in this set) are dropped so slots free up.
+        """
+        if not self._valid_session_id(session_id):
+            self.begin_halt("invalid_session")
+            return False
+        if self.state is RiskState.ACTIVE:
+            return True
+        if not all(
+            isinstance(position, Position)
+            and self._valid_ticker(position.ticker)
+            and self._positive(position.qty)
+            and self._positive(position.avg_entry_price)
+            for position in positions
+        ):
+            self.begin_halt("invalid_recovery_positions")
+            return False
+        if len({position.ticker for position in positions}) != len(positions):
+            self.begin_halt("invalid_recovery_positions")
+            return False
+        confirmed = set(confirmed_client_ids)
+        # Iterate over a copy so removals during the loop are safe.
+        for client_order_id in list(self._acknowledged_entries):
+            if client_order_id not in confirmed:
+                self._acknowledged_entries.pop(client_order_id, None)
+                reservation = self.reservations.pop(client_order_id, None)
+                if reservation is not None:
+                    self._released_reservations.add(client_order_id)
+                stale_broker_ids = [
+                    broker_id
+                    for broker_id, pending in self._pending_entries.items()
+                    if pending.reservation_id == client_order_id
+                ]
+                for broker_id in stale_broker_ids:
+                    self._pending_entries.pop(broker_id, None)
+        self.positions = list(positions)
+        self.state = RiskState.ACTIVE
+        self.halt_reason = None
+        self.session_id = session_id
+        return True
+
+    @_synchronized
     def hard_stop_triggered(self, equity: float) -> bool:
         if not self._positive(equity):
             self.begin_halt("invalid_equity")
