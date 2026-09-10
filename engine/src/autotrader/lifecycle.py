@@ -86,19 +86,25 @@ class EngineLifecycle:
             return
         if self.risk.session_id == day:
             return
-        positions = self._positions_snapshot(now) or []
-        orders = self._open_orders(now) or []
+        # Only a fresh broker snapshot can unblock a rollover. A failed read must abort
+        # BEFORE recovery, never become an empty book that drops live positions.
+        positions = self._positions_snapshot(now)
+        orders = self._open_orders(now)
+        if positions is None or orders is None:
+            return
+        # Fetch the account snapshot before committing recovery so a failed account read
+        # leaves the pre-rollover session state untouched (no half-rolled session).
+        account = self._account_snapshot(now)
+        if account is None:
+            return
         if not self._recover_from_broker(positions, orders, now):
             return
         # A new session re-baselines its stop levels (daily_stop/hard_stop) from a
         # fresh broker account snapshot, exactly like a cold startup would.
-        snapshot = self._account_snapshot(now)
-        if snapshot is None:
-            return
-        self.risk.day_start_equity = snapshot.equity
-        self.risk.peak_equity = snapshot.equity
+        self.risk.day_start_equity = account.equity
+        self.risk.peak_equity = account.equity
         self.runner.equity = Equity(
-            snapshot.equity, snapshot.equity, snapshot.equity, self._session_id(now)
+            account.equity, account.equity, account.equity, self._session_id(now)
         )
 
     def tick(self, now: datetime, universe: list[str]) -> bool:

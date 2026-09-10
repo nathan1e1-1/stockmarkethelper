@@ -716,3 +716,41 @@ def test_rollover_refreshes_day_start_equity_baseline():
     assert risk.day_start_equity == 95_000.0
     assert risk.peak_equity == 95_000.0
     assert risk.session_id == "2026-09-03"
+
+
+class BlockedPositionsExecutor(Executor):
+    """Simulates a transient broker positions-snapshot failure (positions_snapshot
+    returns None)."""
+
+    def __init__(self, positions=None, orders=None, equity=100_000.0, *, block_positions=False):
+        super().__init__(positions=positions, orders=orders, equity=equity)
+        self.block_positions = block_positions
+
+    def positions_snapshot(self, *, now=None):
+        if self.block_positions:
+            return None
+        return super().positions_snapshot(now=now)
+
+
+def test_rollover_does_not_drop_positions_when_broker_snapshot_unreadable():
+    """A failed broker read during rollover must NOT flatten/drop live positions."""
+    position = Position("AAPL", 4, 100.0, opened_at=NOW)
+    loaded = State(
+        equity=Equity(100_000.0, 100_000.0, 100_000.0, "2026-09-02"),
+        positions=[position],
+        risk_state=RiskState.ACTIVE,
+        session_id="2026-09-02",
+    )
+    executor = BlockedPositionsExecutor(positions=[position], orders=[])
+    engine, risk, runner, executor, _ = lifecycle(store=Store(loaded), executor=executor)
+    assert engine.startup_reconcile() is True
+    assert [(p.ticker, p.qty) for p in risk.positions] == [("AAPL", 4)]
+    next_day = datetime(2026, 9, 3, 9, 30, tzinfo=timezone.utc)
+    engine._clock = lambda: next_day
+    risk._clock = lambda: next_day
+    executor.block_positions = True  # broker positions read now fails
+
+    engine._ensure_rollover("2026-09-03")
+
+    assert [(p.ticker, p.qty) for p in risk.positions] == [("AAPL", 4)]
+    assert risk.session_id == "2026-09-02"  # not rolled; broker unreadable
